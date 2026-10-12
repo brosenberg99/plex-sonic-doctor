@@ -1,0 +1,116 @@
+"""The GUI's state and web server, on made-up results in a temp folder."""
+import http.client
+import json
+import os
+import shutil
+import tempfile
+import threading
+import unittest
+
+from helpers import fingerprint, noisy_copy
+
+
+class GuiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="sonicdoctor_gui_")
+        os.environ["SONICDOCTOR_HOME"] = os.path.join(cls.base, "home")
+        from plex_sonic_doctor import analysis, config, reports
+        from plex_sonic_doctor.config import Rules
+        tracks, fps, streams = [], {}, {}
+        a, b = fingerprint(), fingerprint()
+        for i, (title, folder, codec, kbps, fp, dur) in enumerate([
+                ("Song One", "A", "flac", 1000, a, 200), ("Song One", "B", "mp3", 320, noisy_copy(a), 200),
+                ("Song Two", "A", "flac", 1000, b, 300), ("Song Two (Radio Edit)", "C", "mp3", 320, noisy_copy(b), 240)],
+                start=1):
+            path = os.path.join(cls.base, "Music", folder, f"{title}.{codec}")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(os.urandom(1000 + i))
+            tracks.append({"id": i, "title": title, "artist": "X", "album": folder, "duration": float(dur), "codec": codec,
+                           "bitrate": kbps, "size": 1000 + i, "file": path, "analysed": True})
+            fps[path] = (fp, None, None)
+            streams[i] = {"loudness": -12.0, "lra": 6.0, "peak": 0.9, "channels": 2.0}
+        pairs = [(x, y, 0.01) for x in range(4) for y in range(x + 1, 4)]
+        res = analysis.analyse(tracks, pairs, fps, streams, Rules(), lambda i, j: 0.01)
+        cfg = config.load()
+        cfg.holding_dir = os.path.join(cls.base, "holding")
+        config.save(cfg)
+        reports.write(res, streams, config.sub_dir("reports"))
+        cls.tracks = tracks
+
+        from plex_sonic_doctor.gui.server import App, _Server, make_handler
+        cls.app = App()
+        cls.httpd = _Server(("127.0.0.1", 0), make_handler(cls.app))
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        os.environ.pop("SONICDOCTOR_HOME", None)
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def request(self, method, path, body=None, key=True, host="127.0.0.1"):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        headers = {"Host": f"{host}:{self.port}"}
+        if key:
+            headers["X-Sonic-Doctor"] = self.app.secret if key is True else key
+        data = None
+        if body is not None:
+            data = json.dumps(body)
+            headers["Content-Type"] = "application/json"
+        c.request(method, path, data, headers)
+        r = c.getresponse()
+        raw = r.read()
+        c.close()
+        return r.status, raw
+
+    def test_only_this_computer_with_the_key(self):
+        self.assertEqual(self.request("GET", "/api/state", key=False)[0], 403)
+        self.assertEqual(self.request("GET", "/api/state", key="wrong")[0], 403)
+        self.assertEqual(self.request("GET", "/api/state", host="evil.example")[0], 403)   # DNS-rebinding guard
+        self.assertEqual(self.request("GET", "/api/state")[0], 200)
+
+    def test_page_and_no_way_out_of_the_static_folder(self):
+        status, body = self.request("GET", "/", key=False)
+        self.assertEqual(status, 200)
+        self.assertIn(b"Plex Sonic Doctor", body)
+        self.assertEqual(self.request("GET", "/..%2F..%2Fconfig.py", key=False)[0], 404)
+        self.assertEqual(self.request("GET", "/../server.py", key=False)[0], 404)
+
+    def test_views_decisions_and_the_move_rules(self):
+        st, body = self.request("GET", "/api/identical")
+        groups = json.loads(body)["items"]
+        self.assertEqual([[c["title"] for c in g["copies"]] for g in groups], [["Song One", "Song One"]])
+        versions = json.loads(self.request("GET", "/api/versions?reason=length")[1])["items"]
+        self.assertEqual(len(versions), 1)
+
+        # mark suggested -> the MP3 copy; mark both versions of Song Two -> refused by the mover
+        r = json.loads(self.request("POST", "/api/bulk", {"tab": "identical", "action": "suggested", "filters": {}})[1])
+        self.assertEqual(r["changed"], 1)
+        files = [v["file"] for v in versions[0]["versions"]]
+        self.request("POST", "/api/decide", {"files": files, "decision": "remove"})
+        plan = json.loads(self.request("GET", "/api/plan")[1])
+        self.assertEqual(plan["files"], 1)
+        self.assertTrue(plan["items"][0]["src"].endswith(os.path.join("B", "Song One.mp3")))
+        self.assertIn("Song Two", plan["problems"][0])
+        self.assertIn("every copy is marked", plan["problems"][0])
+        r = json.loads(self.request("POST", "/api/bulk", {"tab": "versions", "action": "clear", "filters": {}})[1])
+        self.assertEqual(r["changed"], 2)
+        self.request("POST", "/api/bulk", {"tab": "identical", "action": "clear", "filters": {}})
+        self.assertEqual(json.loads(self.request("GET", "/api/state")[1])["marked"]["files"], 0)
+
+    def test_a_second_copy_cant_share_the_port(self):
+        from plex_sonic_doctor.gui.server import _Server, make_handler
+        with self.assertRaises(OSError):
+            _Server(("127.0.0.1", self.port), make_handler(self.app))
+
+    def test_unknown_api_and_bad_track(self):
+        self.assertEqual(self.request("GET", "/api/nope")[0], 404)
+        self.assertEqual(self.request("GET", f"/api/audio?k=999&t={self.app.secret}", key=False)[0], 404)
+
+
+if __name__ == "__main__":
+    unittest.main()

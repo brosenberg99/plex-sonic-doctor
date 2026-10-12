@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Never commit personal data. The app keeps settings, caches, reports and move logs in the
+# user's app-data folder, not here; these patterns are a second line of defence.
+.env
+config.json
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+reports/
+cache/
+moves/
+*.jsonl

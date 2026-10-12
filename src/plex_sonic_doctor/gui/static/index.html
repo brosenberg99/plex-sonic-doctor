@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plex Sonic Doctor</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="icon.svg" alt="" width="28" height="28"> <span>Plex Sonic Doctor</span>
+    <small id="server-name"></small></div>
+  <div id="job-chip" class="job-chip hidden" title="Background job">
+    <span id="job-chip-text"></span>
+    <div class="bar small"><div id="job-chip-bar"></div></div>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="identical">Identical copies <span class="count" id="n-identical"></span></button>
+  <button data-tab="versions">Different versions <span class="count" id="n-versions"></span></button>
+  <button data-tab="broken">Possibly broken <span class="count" id="n-broken"></span></button>
+  <button data-tab="check">Check by ear <span class="count" id="n-check"></span></button>
+  <button data-tab="moves">Move &amp; undo</button>
+  <button data-tab="settings">Settings</button>
+  <button data-tab="setup">Setup</button>
+</nav>
+
+<main>
+  <!-- OVERVIEW -->
+  <section id="tab-overview" class="tab">
+    <div id="not-configured" class="notice hidden">
+      <b>Welcome.</b> First, connect to your Plex server. <button class="primary" data-goto="setup">Start setup</button>
+    </div>
+    <div id="tools-warning" class="notice warn hidden"></div>
+    <div class="cards" id="stat-cards"></div>
+    <div class="panel">
+      <h2>Scan</h2>
+      <p class="hint">Scanning only reads your library. The first scan fingerprints the candidate files, which can take
+        about an hour over a network share; later scans only check new or changed files.</p>
+      <div class="row-buttons">
+        <button class="primary" id="btn-scan">Scan library</button>
+        <button id="btn-quick" title="Re-sort the last scan with the current rules, without asking Plex again">Quick re-sort</button>
+        <button id="btn-stop" class="danger hidden">Stop</button>
+        <button id="btn-open-reports" class="link">Open the reports folder</button>
+      </div>
+      <div id="job-panel" class="job-panel hidden">
+        <div class="job-title"><b id="job-kind"></b> <span id="job-message"></span></div>
+        <div class="bar"><div id="job-bar"></div></div>
+        <pre id="job-log"></pre>
+      </div>
+      <details class="damage">
+        <summary>Optional: full damage check (slow)</summary>
+        <p class="hint">Decodes every file looking for corruption. It takes hours for a big library, saves as it goes,
+          and can be stopped and resumed. Afterwards, use <b>Quick re-sort</b> to add what it found to <i>Possibly broken</i>.</p>
+        <div class="row-buttons"><input id="damage-folder" placeholder="Only files whose path contains... (optional)">
+          <button id="btn-damage">Start damage check</button></div>
+      </details>
+    </div>
+  </section>
+
+  <!-- IDENTICAL -->
+  <section id="tab-identical" class="tab hidden">
+    <p class="hint">Each group is one recording saved more than once. The first copy is the suggested keeper
+      (lossless first, then higher bitrate, then proper tags, never a broken copy). Pick <b>Remove</b> for copies you
+      don't want; nothing moves until you go to <b>Move &amp; undo</b>.</p>
+    <div class="filters" data-for="identical">
+      <input type="search" name="q" placeholder="Search title, artist, album or folder">
+      <select name="status"><option value="">All groups</option><option value="identical">Fingerprint-confirmed</option>
+        <option value="sonic">Sonic match only</option></select>
+      <select name="note"><option value="">Any note</option><option value="titles">Titles differ</option>
+        <option value="none">No notes</option><option value="versions">Song also has other versions</option></select>
+      <select name="marked"><option value="">Decided or not</option><option value="undecided">Undecided</option>
+        <option value="decided">Decided</option></select>
+      <select name="fmt"><option value="">Any format</option><option>flac</option><option>mp3</option><option>aac</option>
+        <option>alac</option><option>vorbis</option><option>opus</option><option>wmav2</option><option>pcm</option></select>
+    </div>
+    <div class="bulk">
+      <span id="identical-total"></span>
+      <button id="btn-mark-suggested">Mark the suggested copies for removal in these groups</button>
+      <button id="btn-clear-identical" class="link">Clear decisions in these groups</button>
+    </div>
+    <div id="identical-list" class="list"></div>
+    <div class="pager" data-for="identical"></div>
+  </section>
+
+  <!-- VERSIONS -->
+  <section id="tab-versions" class="tab hidden">
+    <p class="hint">Each card is one song with more than one version (an edit, a remaster, a mono mix, a live take...).
+      Each row is the best copy of that version; identical copies of it are in <i>Identical copies</i>. Keep the
+      versions you want. A song always keeps at least one version.</p>
+    <div class="filters" data-for="versions">
+      <input type="search" name="q" placeholder="Search title, artist, album or folder">
+      <select name="reason"><option value="">Any difference</option><option value="length">Length</option>
+        <option value="loudness">Loudness (different master or mix)</option><option value="mono vs stereo">Mono vs stereo</option>
+        <option value="title says">Version words in the title</option></select>
+      <select name="marked"><option value="">Decided or not</option><option value="undecided">Undecided</option>
+        <option value="decided">Decided</option></select>
+    </div>
+    <div class="bulk"><span id="versions-total"></span>
+      <button id="btn-clear-versions" class="link">Clear decisions in these songs</button></div>
+    <div id="versions-list" class="list"></div>
+    <div class="pager" data-for="versions"></div>
+  </section>
+
+  <!-- BROKEN -->
+  <section id="tab-broken" class="tab hidden">
+    <p class="hint">Files across the whole library that look damaged or wrong, for replacing. <b>Broken</b> files decode
+      to garbage, won't open or stop early. <b>Likely broken</b> covers songs that measure as pure silence, and albums
+      where every track is the same clip. <b>Check</b> covers constant noise (often real noise music), intentional
+      silence and missing files.</p>
+    <div class="filters" data-for="broken">
+      <input type="search" name="q" placeholder="Search title, artist, album or folder">
+      <select name="severity"><option value="">Any severity</option><option>Broken</option><option>Likely broken</option>
+        <option>Check</option></select>
+      <select name="problem"><option value="">Any problem</option><option>impossible audio levels</option>
+        <option>couldn't be opened</option><option>audio ends early</option><option>decoding errors</option>
+        <option>silent</option><option>same audio as differently titled tracks</option>
+        <option>constant full-volume noise</option><option>missing from disk</option></select>
+    </div>
+    <div class="bulk"><span id="broken-total"></span></div>
+    <div id="broken-list" class="list"></div>
+    <div class="pager" data-for="broken"></div>
+  </section>
+
+  <!-- CHECK BY EAR -->
+  <section id="tab-check" class="tab hidden">
+    <p class="hint">Pairs whose audio only partly matches: alternate takes, remixes, variants, or the same song
+      with a different intro. They aren't treated as copies. Listen if you're curious.</p>
+    <div class="filters" data-for="check"><input type="search" name="q" placeholder="Search"></div>
+    <div class="bulk"><span id="check-total"></span></div>
+    <div id="check-list" class="list"></div>
+    <div class="pager" data-for="check"></div>
+  </section>
+
+  <!-- MOVES -->
+  <section id="tab-moves" class="tab hidden">
+    <div class="panel">
+      <h2>Move the copies marked for removal</h2>
+      <p class="hint">Marked copies are <b>moved</b> (never deleted) to the holding folder, keeping their folder layout,
+        so every move can be undone. Every song keeps at least one copy; groups where everything is marked are skipped.</p>
+      <label class="check option"><input type="checkbox" id="opt-playlists">
+        <b>Also update playlists and collections</b>: where a moved copy appears, put the copy you kept of the same
+        recording in its place, in the same position
+        <span class="hint">Only normal playlists and track collections: smart ones are filled in by Plex itself. Only
+          identical copies are swapped (a removed radio edit isn't replaced by the album version). The preview lists
+          every change, and undo puts the original entries back.</span></label>
+      <div class="row-buttons"><button class="primary" id="btn-plan">Preview the move</button></div>
+      <div id="plan" class="hidden"></div>
+    </div>
+    <div class="panel">
+      <h2>Moved batches</h2>
+      <div id="batches"></div>
+      <div class="row-buttons"><button id="btn-rescan">Ask Plex to rescan the music libraries</button></div>
+      <p class="hint">Plex marks moved tracks unavailable after a rescan. When you're happy, you can delete the
+        holding folder yourself. Until then, everything can be put back.</p>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" class="tab hidden">
+    <form id="settings-form" class="panel">
+      <h2>What counts as an identical copy</h2>
+      <p class="hint">A copy is <i>identical</i> to the keeper only if it passes all of these checks. Anything else that
+        matches the song is a <i>different version</i>. After changing these, use <b>Quick re-sort</b>.</p>
+      <label>Lengths within <input type="number" name="identical_max_length_diff" step="0.5" min="0" max="30"> seconds
+        <span class="hint">Copies 2-3 s apart are often the same file with extra silence at the end.</span></label>
+      <label>Loudness within <input type="number" name="identical_max_loudness_diff" step="0.1" min="0" max="10"> LU
+        <span class="hint">Copies of one master stay within about 0.4; remasters and different mixes usually differ by 1 or more.</span></label>
+      <label class="check"><input type="checkbox" name="split_on_title_words"> Treat version words in titles
+        (Live, Remix, Radio Edit, Instrumental...) as different versions
+        <span class="hint">Untick to put title-only differences in Identical copies, with a note.</span></label>
+      <details><summary>Advanced</summary>
+        <label>Same audio at <input type="number" name="same_audio" step="0.01" min="0.5" max="1"> fingerprint agreement (0.85)</label>
+        <label>Check by ear from <input type="number" name="maybe_audio" step="0.01" min="0.5" max="1"> (0.65)</label>
+        <label>Parallel jobs <input type="number" name="workers" min="1" max="32"></label>
+        <label>ffmpeg <input name="ffmpeg" class="wide"></label>
+        <label>fpcalc <input name="fpcalc" class="wide"></label>
+      </details>
+      <h2>Holding folder</h2>
+      <label>Moved copies go to <input name="holding_dir" class="wide" id="holding-input"></label>
+      <p class="hint">Leave empty to use <code id="holding-default"></code>. A folder on the same drive as the
+        music is fastest.</p>
+      <div class="row-buttons"><button class="primary" type="submit">Save</button>
+        <button type="button" id="btn-save-resort">Save and quick re-sort</button> <span id="settings-saved"></span></div>
+    </form>
+  </section>
+
+  <!-- SETUP -->
+  <section id="tab-setup" class="tab hidden">
+    <div class="panel step">
+      <h2>1. Connect to Plex <span class="done" id="s1-done"></span></h2>
+      <p class="hint">Sign in the official way: you'll get a short code to enter at plex.tv/link. Your password never
+        passes through this app.</p>
+      <div class="row-buttons"><button class="primary" id="btn-pin">Sign in with Plex</button></div>
+      <div id="pin-box" class="hidden"></div>
+      <details><summary>Or type the server address and a token</summary>
+        <label>Server address <input id="man-url" class="wide" placeholder="http://192.168.1.10:32400"></label>
+        <label>Plex token <input id="man-token" class="wide" type="password"></label>
+        <p class="hint"><a href="https://support.plex.tv/articles/204059436" target="_blank" rel="noopener">How to find your token</a></p>
+        <button id="btn-manual">Connect</button></details>
+    </div>
+    <div class="panel step">
+      <h2>2. Music libraries</h2>
+      <div id="libraries"></div>
+    </div>
+    <div class="panel step">
+      <h2>3. Your music files <span class="done" id="s3-done"></span></h2>
+      <p class="hint">To fingerprint the audio, this computer must be able to open the files. If Plex sees them under
+        another name (like <code>E:\Music</code> on the server and <code>H:\Music</code> here), point at your music folder.</p>
+      <div id="paths-status"></div>
+      <div class="row-buttons"><input id="local-folder" class="wide" placeholder="Your music folder on this computer, e.g. H:\ or /Volumes/Music">
+        <button id="btn-paths">Check</button></div>
+    </div>
+    <div class="panel step">
+      <h2>4. Plex's sonic analysis <span class="done" id="s4-done"></span></h2>
+      <p class="hint">Plex keeps it in its data folder under <code>Plug-in Support/Databases/Music Analysis N</code>
+        (<a href="https://support.plex.tv/articles/202915258-where-is-the-plex-media-server-data-directory-located/" target="_blank" rel="noopener">where that is</a>).
+        If the server is another machine, share that folder (read access is enough).</p>
+      <div id="sonic-status"></div>
+      <div class="row-buttons"><input id="sonic-folder" class="wide" placeholder="Plex data folder, e.g. \\server\Plex Media Server">
+        <button id="btn-sonic">Check</button>
+        <button id="btn-sonic-network" class="link">Use the slower network method instead</button></div>
+    </div>
+    <div class="panel step">
+      <h2>5. Measure Plex's distances on your library</h2>
+      <p class="hint">About 20 requests. It checks how Plex's "sonically similar" distances relate to the sound profiles.</p>
+      <div class="row-buttons"><button id="btn-measure">Measure</button> <span id="scale-status"></span></div>
+    </div>
+    <div class="panel step">
+      <h2>6. Fingerprint tools</h2>
+      <div id="tools-status"></div>
+    </div>
+    <div class="row-buttons"><button class="primary" data-goto="overview">Done: go to Overview</button></div>
+  </section>
+</main>
+
+<footer class="marked-bar" id="marked-bar">
+  <span id="marked-text">Nothing marked for removal yet.</span>
+  <button class="primary" data-goto="moves" id="btn-review">Review &amp; move</button>
+</footer>
+
+<audio id="player"></audio>
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

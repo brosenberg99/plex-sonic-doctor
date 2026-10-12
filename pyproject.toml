@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plex-sonic-doctor"
+version = "0.1.0"
+description = "Find duplicate, different-version and broken tracks in a Plex music library using Plex's own sonic analysis"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "plexapi>=4.15",
+    "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+excel = ["openpyxl>=3.1"]
+
+[project.scripts]
+sonicdoctor = "plex_sonic_doctor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+plex_sonic_doctor = ["gui/static/*"]
