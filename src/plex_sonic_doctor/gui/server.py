@@ -97,7 +97,7 @@ class App:
             return {"version": __version__, "configured": cfg.configured, "server": cfg.server_name or cfg.plex_url,
                     "sonic_dir": cfg.sonic_dir, "path_maps": [m.__dict__ for m in cfg.path_maps],
                     "tools": why if backend else f"{why}. {fingerprint.install_help()}", "tools_ok": bool(backend),
-                    "results": {"created": r["created"], "stats": r["stats"]} if r else None,
+                    "results": {"created": r["created"], "stats": s.live_stats()} if r else None,
                     "marked": s.marked_summary(), "moved": len(s.moved), "job": self.jobs.snapshot(),
                     "data_dir": config.data_dir(), "reports_dir": config.sub_dir("reports")}
         if route == ("GET", "/api/job"):
@@ -110,13 +110,17 @@ class App:
             return s.broken_page(page(), **filt("q", "severity", "problem"))
         if route == ("GET", "/api/check"):
             return s.check_page(page(), **filt("q"))
+        if route == ("GET", "/api/unanalysed"):
+            return s.not_analysed_page(page(), **filt("q", "reason"))
         if route == ("POST", "/api/decide"):
             s.decisions.set_many(body["files"], body.get("decision", ""))
             return {"ok": True, "marked": s.marked_summary()}
         if route == ("POST", "/api/bulk"):
             f = body.get("filters", {})
             f = {k: (v.lower() if k == "q" else v) for k, v in f.items()}
-            if body["action"] == "suggested":
+            if body["tab"] == "unanalysed" and body["action"] == "problems":
+                n = s.mark_problem_files(**{k: f.get(k, "") for k in ("q", "reason")})
+            elif body["action"] == "suggested":
                 n = s.mark_suggested(**{k: f.get(k, "") for k in ("q", "status", "note", "marked", "fmt")})
             else:
                 keys = ("q", "status", "note", "marked", "fmt") if body["tab"] == "identical" else ("q", "reason", "marked")

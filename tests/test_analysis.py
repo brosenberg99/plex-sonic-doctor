@@ -126,6 +126,34 @@ class Broken(unittest.TestCase):
         self.assertNotIn(10, flagged)
         self.assertEqual(res.broken[0]["folder_flagged"], "4 of 4 tracks in this folder")
 
+    def test_why_tracks_have_no_sonic_analysis(self):
+        """Plex analyses whole albums: one problem file blocks its album-mates."""
+        album = [dict(track(i, f"Song {i}", folder="/music/A/Album"), analysed=False, album_id=7) for i in (1, 2, 3)]
+        other = dict(track(4, "Clip", duration=20.0, folder="/music/B"), analysed=False, plex_analysed=True, album_id=8)
+        new = dict(track(5, "New Song", folder="/music/C"), analysed=False, album_id=9)
+        fine = track(6, "Analysed", folder="/music/A/Album")
+        tracks = album + [other, new, fine]
+        checks = {tracks[1]["file"]: ("unfinished iTunes download", "still encrypted")}
+        res = analysis.analyse(tracks, [], {}, {}, Rules(), lambda a, b: None, checks=checks)
+        why = {res.tracks[r["k"]]["id"]: r for r in res.not_analysed}
+        self.assertEqual(sorted(why), [1, 2, 3, 4, 5])
+        self.assertEqual(why[2]["reason"], analysis.REASON_PROBLEM)
+        self.assertEqual(why[1]["reason"], analysis.REASON_BLOCKED)
+        self.assertIn("02 Song 2.mp3", why[3]["details"])
+        self.assertEqual(why[4]["reason"], analysis.REASON_DISCARDED)
+        self.assertEqual(why[5]["reason"], analysis.REASON_UNKNOWN)
+        self.assertEqual(res.stats["not_analysed_reasons"], {analysis.REASON_PROBLEM: 1, analysis.REASON_BLOCKED: 2,
+                                                             analysis.REASON_DISCARDED: 1, analysis.REASON_UNKNOWN: 1})
+        # the problem file is also in Possibly broken, with just that problem (not what Plex measured for it)
+        res = analysis.analyse(tracks, [], {}, {2: stream(float("-inf"))}, Rules(), lambda a, b: None, checks=checks)
+        self.assertEqual([(res.tracks[b["k"]]["id"], b["problems"][0][:2]) for b in res.broken],
+                         [(2, ("Broken", "unfinished iTunes download"))])
+
+    def test_album_falls_back_to_folder_and_name_without_plex_album(self):
+        a = [dict(track(i, f"Song {i}", folder="/music/A/Album"), analysed=False) for i in (1, 2)]
+        res = analysis.analyse(a, [], {}, {}, Rules(), lambda x, y: None, checks={a[0]["file"]: ("not audio", "web page")})
+        self.assertEqual([r["reason"] for r in res.not_analysed], [analysis.REASON_PROBLEM, analysis.REASON_BLOCKED])
+
     def test_broken_copy_is_never_the_keeper(self):
         a = fingerprint()
         tracks = [track(1, "Song", codec="flac", bitrate=1000), track(2, "Song", codec="mp3", bitrate=128)]

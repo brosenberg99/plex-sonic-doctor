@@ -9,8 +9,11 @@ sonic analysis Plex has already done on every track.
   "(1)" copy...). A suggested copy to keep is marked for each group.
 - **Different versions of the same song**: radio edits, remasters, mono mixes, live takes. Each
   row says how it differs, so you can keep the ones you want.
-- **Possibly broken files**: files that decode to garbage or silence, won't open, stop early, or a
-  whole album where every track is the same clip.
+- **Possibly broken files**: files that decode to garbage or silence, won't open, stop early, aren't
+  audio at all, are still encrypted, or a whole album where every track is the same clip.
+- **Why tracks have no sonic analysis**: Plex analyses a whole album at once, and one file it can't
+  decode makes it skip the entire album, every night, without saying which file. The **Not analysed**
+  tab names that file.
 
 Nothing is ever deleted. Copies you choose to remove are **moved** to a holding folder, and every
 move can be undone.
@@ -59,11 +62,13 @@ small window open while you use it.
 
 1. **Setup** walks you through connecting to Plex and finding your files (once).
 2. **Overview**: press **Scan library**. A progress bar shows how far it is; you can stop it any time.
-3. **Identical copies**, **Different versions**, **Possibly broken** and **Check by ear** show the
-   results. Each has filters (search, status, notes, format, reasons). Each track has **▶ start** and
+3. **Identical copies**, **Different versions**, **Possibly broken**, **Check by ear** and **Not analysed**
+   show the results. Each has filters (search, status, notes, format, reasons). Each track has **▶ start** and
    **▶ middle** buttons that play a 30-second clip, and a 📂 button that shows the file in its folder.
 4. Pick **Remove** for copies you don't want, or use **Mark the suggested copies for removal** to do a
-   whole filtered list at once. Decisions are saved as you go, and the bar at the bottom shows what's marked.
+   whole filtered list at once. Broken files and the problem files on **Not analysed** can be marked too
+   (a file that's part of an identical group still keeps one copy). Decisions are saved as you go, and the
+   bar at the bottom shows what's marked. The counts on every tab leave out what's already been moved.
 5. **Move & undo** previews the move, then moves the marked copies to the holding folder. Every
    batch can be put back from the same page, all of it or just the files you search for.
 6. **Settings**: change what counts as identical (for example, lengths within 3 s instead of 2), then
@@ -100,7 +105,7 @@ setup that path. Without access, the tool asks Plex over the network instead, wh
 | `different_versions.csv` | One row per version of a song, with `how_it_differs_from_version_1`. |
 | `possibly_broken.csv` | Damaged or wrong files across the whole library, with `folder_flagged` (e.g. "20 of 20 tracks in this folder") so you can tell when a whole album needs replacing. |
 | `check_by_ear.csv` | Pairs whose audio only partly matches (alternate takes, variants). |
-| `not_analysed.csv` | Tracks Plex hasn't analysed yet, so they weren't checked. |
+| `not_analysed.csv` | Tracks without Plex's sonic analysis (so they weren't compared), each with a `reason`: a problem file, blocked by a problem file in the same album, result thrown away by Plex (mostly clips under 30 s), or no problem found. |
 
 The first scan fingerprints the candidate files, which can take about an hour for a large library
 over a network share. Later scans only fingerprint new or changed files. `sonicdoctor scan --quick`
@@ -185,12 +190,19 @@ A copy that matches the song but fails a check is a **different version**. The s
 | Broken | Plex measured a peak over 2x full scale (the file decodes to garbage) |
 | Broken | The file can't be opened (e.g. a WAV named .mp3, or an M4A missing its index) |
 | Broken | The audio stops well before the length Plex reports |
+| Broken | Not audio at all (e.g. a saved "404 Not Found" web page named .mp3), or an empty file |
+| Broken | An unfinished iTunes download: the audio is still encrypted and the file has no key to unlock it (its finished album-mates play fine). Download it again from your iTunes purchases |
+| Broken | Copy-protected (DRM), e.g. an iTunes Store purchase from before 2009 |
+| Broken | A track Plex couldn't analyse that won't decode |
 | Broken | The damage check found decoding errors |
 | Likely broken | A normal song measured as pure digital silence |
 | Likely broken | The same audio under 3+ different titles, plus a sign of a bad file: preview-length clips (exactly 30, 60 or 90 s), audio louder than -6 LUFS, or several of the titles in one album folder |
 | Check | Constant full-volume noise (often noise music) |
 | Check | Probably intentional silence |
 | Check | The file is missing from disk |
+
+The not-audio, encrypted and won't-decode checks run during a full scan, on the tracks Plex couldn't
+analyse (Plex already decoded the rest), and are saved, so later scans only look at new or changed files.
 
 ## Privacy
 

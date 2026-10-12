@@ -34,7 +34,7 @@ const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toas
 // ------------------------------------------------------------------ tabs and state
 
 let STATE = null;
-const views = { identical: { page: 1 }, versions: { page: 1 }, broken: { page: 1 }, check: { page: 1 } };
+const views = { identical: { page: 1 }, versions: { page: 1 }, broken: { page: 1 }, check: { page: 1 }, unanalysed: { page: 1 } };
 let current = "overview";
 
 function showTab(name) {
@@ -65,7 +65,8 @@ async function refreshState() {
   $("#n-identical").textContent = s ? num(s.identical_groups + s.sonic_only_groups) : "";
   $("#n-versions").textContent = s ? num(s.version_songs) : "";
   $("#n-broken").textContent = s ? num(s.broken_files) : "";
-  $("#n-check").textContent = s ? num(s.verdicts["check by ear"] || 0) : "";
+  $("#n-check").textContent = s ? num(s.check_pairs ?? (s.verdicts["check by ear"] || 0)) : "";
+  $("#n-unanalysed").textContent = s ? num(s.not_analysed) : "";
   renderCards(s);
   renderMarked(STATE.marked);
   renderJob(STATE.job);
@@ -82,8 +83,8 @@ function renderCards(s) {
       <div>songs with different versions</div><div class="sub">${num(s.versions)} versions in all</div></div>
     <div class="card" data-goto="broken"><div class="big">${num(s.broken_files)}</div>
       <div>possibly broken files</div><div class="sub">${num(sev["Broken"])} broken, ${num(sev["Likely broken"])} likely, ${num(sev["Check"])} to check</div></div>
-    <div class="card"><div class="big">${num(s.tracks)}</div><div>tracks</div>
-      <div class="sub">${num(s.not_analysed)} not analysed by Plex yet · last scan ${esc(STATE.results.created)}</div></div>`;
+    <div class="card" data-goto="unanalysed"><div class="big">${num(s.tracks)}</div><div>tracks</div>
+      <div class="sub">${num(s.not_analysed)} without Plex's sonic analysis (see why) · last scan ${esc(STATE.results.created)}</div></div>`;
 }
 
 function renderMarked(m) {
@@ -175,11 +176,35 @@ async function loadList(name) {
   if (!STATE || !STATE.results) { list.innerHTML = `<div class="empty">No scan yet. Run one from the Overview tab.</div>`; return; }
   const data = await api(`/api/${name}?${qs}`);
   views[name].data = data;
-  const word = { identical: "groups", versions: "songs", broken: "files", check: "pairs" }[name];
+  const word = { identical: "groups", versions: "songs", broken: "files", check: "pairs", unanalysed: "tracks" }[name];
   $(`#${name}-total`).textContent = `${num(data.total)} ${word}` + (data.pages > 1 ? ` · page ${data.page} of ${data.pages}` : "");
   list.innerHTML = data.items.length ? data.items.map(RENDER[name]).join("") : `<div class="empty">Nothing matches these filters.</div>`;
   renderPager(name, data);
+  if (name === "unanalysed") renderReasons();
 }
+
+// The reasons on the Not analysed tab, with counts; clicking one filters the list to it.
+function renderReasons() {
+  const s = STATE && STATE.results && STATE.results.stats;
+  const counts = (s && s.not_analysed_reasons) || {};
+  const chosen = $(`.filters[data-for=unanalysed] [name=reason]`).value;
+  const help = {
+    "problem file": "won't decode: not audio, encrypted or damaged",
+    "blocked by another file in its album": "fine, but an album-mate is a problem file",
+    "result thrown away by Plex": "mostly clips under 30 s; nothing to fix",
+    "no problem found": "Plex may not have reached these yet",
+  };
+  $("#unanalysed-reasons").innerHTML = Object.keys(help).filter((r) => counts[r]).map((r) =>
+    `<button data-reason="${esc(r)}" class="${chosen === r ? "active" : ""}"><b>${num(counts[r])}</b>${esc(r)}<span>${esc(help[r])}</span></button>`).join("");
+}
+$("#unanalysed-reasons").onclick = (e) => {
+  const b = e.target.closest("[data-reason]");
+  if (!b) return;
+  const sel = $(`.filters[data-for=unanalysed] [name=reason]`);
+  sel.value = sel.value === b.dataset.reason ? "" : b.dataset.reason;
+  views.unanalysed.page = 1;
+  loadList("unanalysed");
+};
 
 function renderPager(name, d) {
   const el = $(`.pager[data-for=${name}]`);
@@ -228,11 +253,17 @@ const RENDER = {
       <td class="reasons">${esc(t.reasons.join("; "))}${t.match != null ? `<div class="sub">audio match ${pct(t.match)}</div>` : ""}</td></tr>`).join("")}
     </table></div>`,
 
-  broken: (b) => `<div class="group"><table><tr>
-      <td style="width:110px"><span class="sev ${esc(b.severity.split(" ")[0])}">${esc(b.severity)}</span></td>
+  broken: (b) => `<div class="group"><table><tr class="${rowClass(b)}">
+      <td style="width:130px"><span class="sev ${esc(b.severity.split(" ")[0])}">${esc(b.severity)}</span><div>${decisionSelect(b)}</div></td>
       <td>${nameCell(b)}<div class="sub">${esc(b.folder_flagged)}</div></td>
       <td style="width:38%">${b.problems.map((p) => `<div><b>${esc(p.problem)}</b>: <span class="sub">${esc(p.details)}</span></div>`).join("")}</td>
       <td class="num">${b.length}<div>${fmt(b)}</div></td><td>${playButtons(b)}</td></tr></table></div>`,
+
+  unanalysed: (t) => `<div class="group"><table><tr class="${rowClass(t)}">
+      <td style="width:130px"><span class="reason">${esc(t.reason)}</span>${t.removable ? `<div>${decisionSelect(t)}</div>` : ""}</td>
+      <td>${nameCell(t)}</td>
+      <td style="width:38%" class="sub">${esc(t.details)}</td>
+      <td class="num">${t.length}<div>${fmt(t)}</div></td></tr></table></div>`,
 
   check: (p) => `<div class="group"><div class="group-head"><b>Audio match ${pct(p.match)}</b> <span>sonic distance ${p.sonic.toFixed(3)}</span></div>
     <table>${[p.a, p.b].map((t) => `<tr><td>${playButtons(t)}</td><td>${nameCell(t)}</td><td class="num">${t.length}</td><td class="num">${fmt(t)}</td></tr>`).join("")}</table></div>`,
@@ -265,6 +296,13 @@ const clear = (name) => guard(async () => {
   toast(`Cleared ${num(r.changed)} decisions.`); renderMarked(r.marked); loadList(name);
 });
 $("#btn-clear-identical").onclick = clear("identical");
+$("#btn-mark-problems").onclick = guard(async () => {
+  const f = filtersOf("unanalysed");
+  if (!confirm("Mark every problem file in what this list shows for removal?\nFiles you've already decided are left alone. Nothing is moved yet.")) return;
+  const r = await api("/api/bulk", { tab: "unanalysed", action: "problems", filters: f });
+  toast(`Marked ${num(r.changed)} problem ${r.changed === 1 ? "file" : "files"} for removal.`);
+  renderMarked(r.marked); loadList("unanalysed");
+});
 $("#btn-clear-versions").onclick = clear("versions");
 
 // listening and showing files

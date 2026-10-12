@@ -31,8 +31,18 @@ class GuiTests(unittest.TestCase):
                            "bitrate": kbps, "size": 1000 + i, "file": path, "analysed": True})
             fps[path] = (fp, None, None)
             streams[i] = {"loudness": -12.0, "lra": 6.0, "peak": 0.9, "channels": 2.0}
+        # Two tracks Plex couldn't analyse, in one album: a saved web page and its blocked album-mate.
+        for i, (title, data) in enumerate([("Not A Song", b"<html><title>404</title></html>"),
+                                           ("Fine Song", os.urandom(900))], start=5):
+            path = os.path.join(cls.base, "Music", "D", f"{title}.mp3")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+            tracks.append({"id": i, "title": title, "artist": "Y", "album": "D", "album_id": 50, "duration": 180.0,
+                           "codec": "mp3", "bitrate": 320, "size": len(data), "file": path, "analysed": False})
+        checks = {tracks[4]["file"]: ("not audio", "it's a saved web page, not a song")}
         pairs = [(x, y, 0.01) for x in range(4) for y in range(x + 1, 4)]
-        res = analysis.analyse(tracks, pairs, fps, streams, Rules(), lambda i, j: 0.01)
+        res = analysis.analyse(tracks, pairs, fps, streams, Rules(), lambda i, j: 0.01, checks=checks)
         cfg = config.load()
         cfg.holding_dir = os.path.join(cls.base, "holding")
         config.save(cfg)
@@ -101,6 +111,50 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(r["changed"], 2)
         self.request("POST", "/api/bulk", {"tab": "identical", "action": "clear", "filters": {}})
         self.assertEqual(json.loads(self.request("GET", "/api/state")[1])["marked"]["files"], 0)
+
+    def wait_for_job(self):
+        import time
+        for _ in range(200):
+            job = json.loads(self.request("GET", "/api/job")[1])
+            if not job["running"]:
+                return job
+            time.sleep(0.05)
+        self.fail("job didn't finish")
+
+    def stats(self):
+        return json.loads(self.request("GET", "/api/state")[1])["results"]["stats"]
+
+    def test_counts_follow_moves_and_undo(self):
+        before = self.stats()
+        self.assertEqual((before["identical_groups"], before["extra_copies"], before["broken_files"],
+                          before["not_analysed"], before["tracks"]), (1, 1, 1, 2, 6))
+        rows = json.loads(self.request("GET", "/api/unanalysed")[1])["items"]
+        self.assertEqual([(r["title"], r["reason"], r["removable"]) for r in rows],
+                         [("Not A Song", "problem file", True), ("Fine Song", "blocked by another file in its album", False)])
+        self.assertIn("Not A Song.mp3", rows[1]["details"])
+
+        # mark the extra copy and the problem file, then move them for real (in the temp folder)
+        r = json.loads(self.request("POST", "/api/bulk", {"tab": "identical", "action": "suggested", "filters": {}})[1])
+        r = json.loads(self.request("POST", "/api/bulk", {"tab": "unanalysed", "action": "problems", "filters": {}})[1])
+        self.assertEqual((r["changed"], r["marked"]["files"]), (1, 2))
+        self.assertEqual(json.loads(self.request("GET", "/api/plan")[1])["files"], 2)
+        self.request("POST", "/api/move", {})
+        job = self.wait_for_job()
+        self.assertEqual(job["result"]["moved"], 2, job)
+        after = self.stats()
+        self.assertEqual((after["identical_groups"], after["extra_copies"], after["extra_bytes"], after["broken_files"],
+                          after["not_analysed"], after["tracks"]), (0, 0, 0, 0, 1, 4))
+        self.assertEqual(json.loads(self.request("GET", "/api/identical")[1])["total"], 0)   # done groups drop off
+        self.assertEqual(json.loads(self.request("GET", "/api/broken")[1])["total"], 0)
+        self.assertEqual(json.loads(self.request("GET", "/api/unanalysed")[1])["total"], 1)
+
+        # undo puts everything back, and the counts with it
+        batch = json.loads(self.request("GET", "/api/batches")[1])["batches"][0]["batch"]
+        self.request("POST", "/api/undo", {"batch": batch})
+        self.wait_for_job()
+        self.assertEqual(self.stats(), before)
+        self.request("POST", "/api/bulk", {"tab": "identical", "action": "clear", "filters": {}})
+        self.request("POST", "/api/decide", {"files": [rows[0]["file"]], "decision": ""})
 
     def test_a_second_copy_cant_share_the_port(self):
         from plex_sonic_doctor.gui.server import _Server, make_handler

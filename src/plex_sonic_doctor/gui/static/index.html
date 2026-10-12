@@ -23,6 +23,7 @@
   <button data-tab="versions">Different versions <span class="count" id="n-versions"></span></button>
   <button data-tab="broken">Possibly broken <span class="count" id="n-broken"></span></button>
   <button data-tab="check">Check by ear <span class="count" id="n-check"></span></button>
+  <button data-tab="unanalysed">Not analysed <span class="count" id="n-unanalysed"></span></button>
   <button data-tab="moves">Move &amp; undo</button>
   <button data-tab="settings">Settings</button>
   <button data-tab="setup">Setup</button>
@@ -108,7 +109,7 @@
   <!-- BROKEN -->
   <section id="tab-broken" class="tab hidden">
     <p class="hint">Files across the whole library that look damaged or wrong, for replacing. <b>Broken</b> files decode
-      to garbage, won't open or stop early. <b>Likely broken</b> covers songs that measure as pure silence, and albums
+      to garbage, won't open, stop early, aren't audio at all or are still encrypted. <b>Likely broken</b> covers songs that measure as pure silence, and albums
       where every track is the same clip. <b>Check</b> covers constant noise (often real noise music), intentional
       silence and missing files.</p>
     <div class="filters" data-for="broken">
@@ -118,8 +119,12 @@
       <select name="problem"><option value="">Any problem</option><option>impossible audio levels</option>
         <option>couldn't be opened</option><option>audio ends early</option><option>decoding errors</option>
         <option>silent</option><option>same audio as differently titled tracks</option>
-        <option>constant full-volume noise</option><option>missing from disk</option></select>
+        <option>constant full-volume noise</option><option>missing from disk</option>
+        <option>not audio</option><option>unfinished iTunes download</option><option>copy-protected (DRM)</option>
+        <option>empty file</option><option>couldn't be decoded</option></select>
     </div>
+    <p class="hint">Files that aren't a copy of anything can be marked for removal here; they move to the holding
+      folder like any other copy and can be put back.</p>
     <div class="bulk"><span id="broken-total"></span></div>
     <div id="broken-list" class="list"></div>
     <div class="pager" data-for="broken"></div>
@@ -133,6 +138,27 @@
     <div class="bulk"><span id="check-total"></span></div>
     <div id="check-list" class="list"></div>
     <div class="pager" data-for="check"></div>
+  </section>
+
+  <!-- NOT ANALYSED -->
+  <section id="tab-unanalysed" class="tab hidden">
+    <p class="hint">Tracks without Plex's sonic analysis can't be compared, so they never show up as copies. Plex
+      analyses a <b>whole album at once</b>: if one file in an album won't decode, Plex skips the entire album, every
+      night, without saying which file. This list names that file. Move the problem files out (or replace them) and
+      the rest of the album gets analysed during Plex's next nightly maintenance.</p>
+    <p class="hint">Some tracks are marked analysed by Plex but have no sound profile: Plex threw the result away,
+      which happens mostly with clips under 30 seconds. They're counted here, and there's nothing to fix.</p>
+    <div class="reason-chips" id="unanalysed-reasons"></div>
+    <div class="filters" data-for="unanalysed">
+      <input type="search" name="q" placeholder="Search title, artist, album, folder or reason">
+      <select name="reason"><option value="">Any reason</option><option>problem file</option>
+        <option>blocked by another file in its album</option><option>result thrown away by Plex</option>
+        <option>no problem found</option></select>
+    </div>
+    <div class="bulk"><span id="unanalysed-total"></span>
+      <button id="btn-mark-problems">Mark the problem files in this list for removal</button></div>
+    <div id="unanalysed-list" class="list"></div>
+    <div class="pager" data-for="unanalysed"></div>
   </section>
 
   <!-- MOVES -->

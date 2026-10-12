@@ -6,7 +6,7 @@ import threading
 from typing import Dict, List, Optional
 
 from .. import config, mover
-from ..analysis import fmt_dur
+from ..analysis import NOT_ANALYSED_REASONS, REASON_PROBLEM, SEVERITY_ORDER, fmt_dur
 
 DECISIONS = ("remove", "keep")
 
@@ -85,7 +85,7 @@ class State:
         if not self.results:
             return []
         T, out = self.results["tracks"], []
-        for g in self.results["identical"]:
+        for g in self._live_identical():
             ks = [c["k"] for c in g["copies"]]
             if status == "identical" and g["status"].startswith("Sonic"):
                 continue
@@ -124,7 +124,7 @@ class State:
         if not self.results:
             return []
         T, out = self.results["tracks"], []
-        for song in self.results["versions"]:
+        for song in self._live_versions():
             ks = [v["k"] for v in song["versions"]]
             if reason and not any(reason in r for v in song["versions"] for r in v["reasons"]):
                 continue
@@ -152,7 +152,7 @@ class State:
         if not self.results:
             return self._page([], 1, per)
         T, rows = self.results["tracks"], []
-        for b in self.results["broken"]:
+        for b in self._live_broken():
             t = T[b["k"]]
             if severity and b["problems"][0][0] != severity:
                 continue
@@ -162,7 +162,7 @@ class State:
                 continue
             rows.append(b)
         p = self._page(rows, page, per)
-        p["items"] = [dict(self.track(b["k"]), severity=b["problems"][0][0],
+        p["items"] = [dict(self.track(b["k"]), severity=b["problems"][0][0], removable=self.removable(b["k"]),
                            problems=[{"severity": s, "problem": pr, "details": d} for s, pr, d in b["problems"]],
                            folder_flagged=b["folder_flagged"]) for b in p["items"]]
         return p
@@ -171,13 +171,112 @@ class State:
         if not self.results:
             return self._page([], 1, per)
         T = self.results["tracks"]
-        rows = [r for r in self.results["check_by_ear"]
+        rows = [r for r in self._live_check()
                 if not q or q in _match_text(T[r["a"]]["title"], T[r["a"]]["artist"], T[r["a"]]["file"],
                                              T[r["b"]]["title"], T[r["b"]]["artist"], T[r["b"]]["file"])]
         p = self._page(rows, page, per)
         p["items"] = [{"match": r["match"], "sonic": r["sonic"], "a": self.track(r["a"]), "b": self.track(r["b"])}
                       for r in p["items"]]
         return p
+
+    def not_analysed_rows(self, q="", reason="") -> List[dict]:
+        if not self.results:
+            return []
+        T = self.results["tracks"]
+        return [r for r in self._live_not_analysed()
+                if (not reason or r["reason"] == reason)
+                and (not q or q in _match_text(T[r["k"]]["title"], T[r["k"]]["artist"], T[r["k"]]["album"],
+                                               T[r["k"]]["file"], r["details"]))]
+
+    def not_analysed_page(self, page=1, per=100, q="", reason="") -> dict:
+        p = self._page(self.not_analysed_rows(q, reason), page, per)
+        p["items"] = [dict(self.track(r["k"]), reason=r["reason"], details=r["details"],
+                           removable=r["reason"] == REASON_PROBLEM and self.removable(r["k"]))
+                      for r in p["items"]]
+        return p
+
+    # ---------------------------------------------------------------- what's still in the library
+    # The lists and counts leave out what's in the holding folder, so they change with every move
+    # and undo instead of waiting for the next scan. A group or song down to one copy is done.
+
+    def _here(self, k: int) -> bool:
+        return self.results["tracks"][k]["file"] not in self.moved
+
+    def _live_identical(self) -> List[dict]:
+        return [g for g in self.results["identical"] if sum(self._here(c["k"]) for c in g["copies"]) > 1]
+
+    def _live_versions(self) -> List[dict]:
+        return [s for s in self.results["versions"] if sum(self._here(v["k"]) for v in s["versions"]) > 1]
+
+    def _live_broken(self) -> List[dict]:
+        return [b for b in self.results["broken"] if self._here(b["k"])]
+
+    def _live_check(self) -> List[dict]:
+        return [r for r in self.results["check_by_ear"] if self._here(r["a"]) and self._here(r["b"])]
+
+    def _live_not_analysed(self) -> List[dict]:
+        rows = self.results.get("not_analysed", [])
+        # results saved before reasons were recorded hold bare track numbers
+        rows = [r if isinstance(r, dict) else {"k": r, "reason": "", "details": "run a full scan to see why"}
+                for r in rows]
+        return [r for r in rows if self._here(r["k"])]
+
+    def live_stats(self) -> Optional[dict]:
+        """The last scan's numbers, recounted without the files in the holding folder."""
+        if not self.results:
+            return None
+        T, s = self.results["tracks"], dict(self.results["stats"])
+        groups = self._live_identical()
+        extra, extra_bytes = 0, 0
+        for g in groups:
+            if g["status"].startswith("Sonic"):
+                continue
+            here = [T[c["k"]] for c in g["copies"] if self._here(c["k"])]
+            extra += len(here) - 1
+            extra_bytes += sum(t["size"] for t in here[1:])
+        sonic = [g for g in groups if g["status"].startswith("Sonic")]
+        songs = self._live_versions()
+        broken = self._live_broken()
+        unanalysed = self._live_not_analysed()
+        s.update({
+            "tracks": sum(1 for k in range(len(T)) if self._here(k)),
+            "not_analysed": len(unanalysed),
+            "not_analysed_reasons": {r: sum(1 for x in unanalysed if x["reason"] == r) for r in NOT_ANALYSED_REASONS},
+            "identical_groups": len(groups) - len(sonic), "sonic_only_groups": len(sonic),
+            "extra_copies": extra, "extra_bytes": extra_bytes,
+            "version_songs": len(songs),
+            "versions": sum(1 for x in songs for v in x["versions"] if self._here(v["k"])),
+            "broken_files": len(broken),
+            "broken_by_severity": {sev: sum(1 for b in broken if b["problems"][0][0] == sev) for sev in SEVERITY_ORDER},
+            "check_pairs": len(self._live_check()),
+        })
+        return s
+
+    # ---------------------------------------------------------------- problem files
+    # A file that's broken or won't play can be moved on its own (it isn't a copy of anything
+    # kept), unless it's in an identical group or a song's versions: then those rules apply.
+
+    def removable(self, k: int) -> bool:
+        cached = getattr(self, "_grouped", None)
+        if cached is None or cached[0] is not self.results:
+            ks = {c["k"] for g in self.results["identical"] for c in g["copies"]}
+            ks |= {v["k"] for s in self.results["versions"] for v in s["versions"]}
+            self._grouped = cached = (self.results, ks)
+        return k not in cached[1]
+
+    def _problem_ks(self) -> List[int]:
+        ks = [b["k"] for b in self.results["broken"]]
+        ks += [r["k"] for r in self._live_not_analysed() if r["reason"] == REASON_PROBLEM]
+        return sorted({k for k in ks if self.removable(k)})
+
+    def mark_problem_files(self, q="", reason="") -> int:
+        """In the Not analysed list as filtered: mark every problem file 'remove' (if undecided)."""
+        T = self.results["tracks"]
+        files = [T[r["k"]]["file"] for r in self.not_analysed_rows(q, reason)
+                 if r["reason"] == REASON_PROBLEM and self.removable(r["k"])]
+        files = [f for f in files if not self.decisions.get(f) and f not in self.moved]
+        self.decisions.set_many(files, "remove")
+        return len(files)
 
     # ---------------------------------------------------------------- decisions in bulk
 
@@ -232,6 +331,8 @@ class State:
         for s in self.results["versions"]:
             name = f"{label(s['versions'][0]['k'])} (versions, {s['group']})"
             rows += [row(name, v["k"], "versions") for v in s["versions"]]
+        for k in self._problem_ks():
+            rows.append(row(f"{label(k)} (problem file)", k, mover.PROBLEM_KIND))
         return [r for r in rows if r["file"] not in self.moved]
 
     def plan(self) -> mover.Plan:

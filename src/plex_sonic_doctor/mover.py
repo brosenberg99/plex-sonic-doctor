@@ -6,7 +6,8 @@ moves/<batch>.jsonl and to a manifest.jsonl inside the holding batch folder; if 
 plan_undo(from_folder=...) rebuilds the original locations from the folder layout.
 
 Safety rules: nothing happens until execute() is called; nothing is ever overwritten in either
-direction; a group always keeps at least one copy that exists on disk.
+direction; a group always keeps at least one copy that exists on disk. The exception is a
+problem file (broken, or not playable at all) that isn't a copy of anything: it's its own group.
 """
 import csv
 import json
@@ -20,6 +21,7 @@ from typing import Callable, Dict, List, Optional
 HOLDING_DIR_NAME = "_duplicates_holding"
 REMOVE_WORDS = {"remove", "r", "x", "delete", "del", "yes", "y", "move"}
 KEEP_WORDS = {"", "keep", "k", "no", "n"}
+PROBLEM_KIND = "problem file"     # a row of this kind may move without a copy staying behind
 
 
 # ---------------------------------------------------------------- decisions
@@ -168,6 +170,9 @@ def plan_moves(rows: List[dict], holding_override: str = "") -> Plan:
         if not marked:
             continue
         staying = [r for r, d in zip(rs, decisions) if d not in REMOVE_WORDS]
+        if all(cell(r, "kind") == PROBLEM_KIND for r in rs):
+            candidates.append((g, marked, None))
+            continue
         if not staying:
             plan.problems.append(f"group {g}: every copy is marked remove; skipped (one copy must stay)")
             continue
@@ -175,10 +180,10 @@ def plan_moves(rows: List[dict], holding_override: str = "") -> Plan:
 
     # Look at every file involved once, in parallel: over a network share, one-at-a-time checks
     # of thousands of files take minutes.
-    sizes = _sizes({cell(r, "file") for _, m, s in candidates for r in m + s})
+    sizes = _sizes({cell(r, "file") for _, m, s in candidates for r in m + (s or [])})
     marked_rows = []
     for g, marked, staying in candidates:
-        if not any(sizes.get(cell(r, "file")) is not None for r in staying):
+        if staying is not None and not any(sizes.get(cell(r, "file")) is not None for r in staying):
             plan.problems.append(f"group {g}: none of the copies being kept exist on disk; skipped")
             continue
         marked_rows.extend(marked)

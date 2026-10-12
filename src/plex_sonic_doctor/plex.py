@@ -78,6 +78,7 @@ def fetch_tracks(server, section_keys: List[str], mapper: PathMapper, progress: 
                     "title": t.get("title", ""),
                     "artist": t.get("originalTitle") or t.get("grandparentTitle", ""),
                     "album": t.get("parentTitle", ""),
+                    "album_id": int(t.get("parentRatingKey") or 0) or None,
                     "duration": int(t.get("duration") or media.get("duration") or 0) / 1000,
                     "codec": (media.get("audioCodec") or part.get("container") or "").lower(),
                     "bitrate": int(media.get("bitrate") or 0),

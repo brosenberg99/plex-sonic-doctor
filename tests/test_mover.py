@@ -105,6 +105,14 @@ class MoverTests(unittest.TestCase):
         mover.execute_undo(mover.plan_undo(self.logs, from_folder=os.path.join(self.hold, plan.batch)))
         self.assertTrue(all(sha(p) == self.before[k] for k, p in self.files.items()))
 
+    def test_a_problem_file_moves_on_its_own_but_a_lone_copy_does_not(self):
+        F = self.files
+        rows = [{"group": "p", "decision": "remove", "file": F["g3_rm"], "kind": mover.PROBLEM_KIND},
+                {"group": "q", "decision": "remove", "file": F["g4_maybe"], "kind": "identical"}]
+        plan = mover.plan_moves(rows, self.hold)
+        self.assertEqual([r["src"] for r in plan.ready], [F["g3_rm"]])
+        self.assertIn("group q: every copy is marked remove", "\n".join(plan.problems))
+
     def test_lost_letters_in_a_resaved_spreadsheet(self):
         rows = [dict(r, file=r["file"].encode("cp1252", "replace").decode("cp1252")) for r in self.rows]
         plan = mover.plan_moves(rows, self.hold)

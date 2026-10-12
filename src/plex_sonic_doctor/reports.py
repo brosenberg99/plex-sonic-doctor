@@ -5,7 +5,7 @@ import os
 import time
 from typing import Dict
 
-from .analysis import Results, SEVERITY_ORDER, fmt_dur
+from .analysis import NOT_ANALYSED_REASONS, Results, SEVERITY_ORDER, fmt_dur
 
 FILES = {
     "identical": "likely_identical.csv",
@@ -90,10 +90,12 @@ def write(res: Results, streams: Dict[int, dict], out_dir: str) -> Dict[str, str
     f.close()
 
     f, w = _writer(paths["not_analysed"])
-    w.writerow(["title", "artist", "album", "length", "format", "file", "plex_id"])
-    for k in sorted(res.not_analysed, key=lambda k: T[k]["file"].lower()):
-        t = T[k]
-        w.writerow([t["title"], t["artist"], t["album"], fmt_dur(t["duration"]), t["codec"], t["file"], t["id"]])
+    w.writerow(["reason", "details", "title", "artist", "album", "length", "format", "file", "plex_id"])
+    order = {r: n for n, r in enumerate(NOT_ANALYSED_REASONS)}
+    for r in sorted(res.not_analysed, key=lambda r: (order.get(r["reason"], 9), T[r["k"]]["file"].lower())):
+        t = T[r["k"]]
+        w.writerow([r["reason"], r["details"], t["title"], t["artist"], t["album"], fmt_dur(t["duration"]), t["codec"],
+                    t["file"], t["id"]])
     f.close()
 
     summary = summary_text(res)
@@ -110,6 +112,9 @@ def summary_text(res: Results) -> str:
         f"Plex Sonic Doctor scan, {time.strftime('%Y-%m-%d %H:%M')}",
         "",
         f"Tracks: {s['tracks']:,}  (with sonic analysis: {s['analysed']:,}, without: {s['not_analysed']:,})",
+    ]
+    lines += [f"  without, {reason}: {n:,}" for reason, n in s.get("not_analysed_reasons", {}).items() if n]
+    lines += [
         f"Close sonic pairs checked: {s['close_pairs']:,};  files fingerprinted: {s['fingerprinted']:,}",
         f"  same audio {v.get('same audio', 0):,}, partly matching {v.get('check by ear', 0):,}, "
         f"different audio {v.get('different audio', 0):,}, silence left out {v.get('silence', 0):,}",

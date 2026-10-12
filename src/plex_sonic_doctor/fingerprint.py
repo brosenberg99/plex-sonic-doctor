@@ -143,6 +143,8 @@ def open_cache(path: str) -> sqlite3.Connection:
         file TEXT PRIMARY KEY, size INTEGER, mtime REAL, start BLOB, mid BLOB, error TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS damage (
         file TEXT PRIMARY KEY, size INTEGER, mtime REAL, errors INTEGER, first_error TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS filecheck (
+        file TEXT PRIMARY KEY, size INTEGER, mtime REAL, problem TEXT, details TEXT)""")
     return conn
 
 

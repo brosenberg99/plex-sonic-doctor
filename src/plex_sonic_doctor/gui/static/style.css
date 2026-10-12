@@ -95,6 +95,12 @@ select.decision { min-width: 104px; }
 .reasons { color: var(--likely); font-size: 13px; }
 .sev { font-weight: 700; font-size: 12px; white-space: nowrap; }
 .sev.Broken { color: var(--broken); } .sev.Likely { color: var(--likely); } .sev.Check { color: var(--check); }
+.reason-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 12px; }
+.reason-chips button { display: flex; flex-direction: column; align-items: flex-start; padding: 8px 12px; text-align: left; }
+.reason-chips button b { font-size: 18px; }
+.reason-chips button span { font-size: 12.5px; color: var(--muted); }
+.reason-chips button.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.reason { font-weight: 600; font-size: 13px; }
 
 .pager { display: flex; gap: 6px; align-items: center; justify-content: center; margin: 14px 0; }
 .empty { color: var(--muted); padding: 30px; text-align: center; }

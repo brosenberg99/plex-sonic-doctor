@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from . import analysis, config, fingerprint, mover, plex, plexdata, reports
+from . import analysis, config, filecheck, fingerprint, mover, plex, plexdata, reports
 from .pathmap import PathMapper
 
 CANDIDATE_MAX_DISTANCE = 0.06   # Plex sonic distance at which a pair is worth fingerprinting
@@ -59,6 +59,9 @@ def run_scan(cfg: config.Config, progress: Callable = lambda m, f=-1: None, refr
     if cfg.sonic_dir and os.path.exists(os.path.join(sonic_copy, "Track.tree")):
         profiles, slot_of = plexdata.load_profiles(sonic_copy)
         for t in tracks:
+            # Plex can mark a track analysed yet keep no sound profile for it (it throws away
+            # results it can't use), so the profiles decide; Plex's own flag is kept to tell why.
+            t["plex_analysed"] = t["analysed"]
             t["analysed"] = t["id"] in slot_of
         idx = [k for k, t in enumerate(tracks) if t["analysed"]]
         units = plexdata.unit_vectors(profiles, [slot_of[tracks[k]["id"]] for k in idx])
@@ -97,6 +100,11 @@ def run_scan(cfg: config.Config, progress: Callable = lambda m, f=-1: None, refr
         check_stop()
         fps = fingerprint.load_fingerprints(conn, {tracks[k]["file"] for k in involved})
         damage = fingerprint.load_damage(conn)
+        if refresh:
+            filecheck.run_file_checks(conn, cfg.ffmpeg, [t for t in tracks if not t["analysed"]],
+                                      max(1, cfg.workers // 2), progress, should_stop)
+            check_stop()
+        checks = filecheck.load_file_checks(conn)
     finally:
         conn.close()
 
@@ -104,7 +112,9 @@ def run_scan(cfg: config.Config, progress: Callable = lambda m, f=-1: None, refr
                                  cfg.workers, progress)
     check_stop()
     progress("Sorting copies into identical, versions and broken", -1)
-    res = analysis.analyse(tracks, pairs, fps, streams, cfg.rules, sonic_distance, damage)
+    not_analysed = {t["file"] for t in tracks if not t["analysed"]}
+    checks = {f: c for f, c in checks.items() if f in not_analysed}
+    res = analysis.analyse(tracks, pairs, fps, streams, cfg.rules, sonic_distance, damage, checks)
     res.stats["fingerprint_method"] = why
     paths = reports.write(res, streams, config.sub_dir("reports"))
     progress("Done", 1)

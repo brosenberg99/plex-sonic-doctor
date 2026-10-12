@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .config import Rules
+from .filecheck import SEVERITY as FILECHECK_SEVERITY
 from .fingerprint import ITEMS_PER_SECOND, START_SECONDS, audio_match, low_information
 
 SAME_LENGTH_SECONDS = 3.0        # longer gaps: compare the start only (a middle window wouldn't line up)
@@ -23,6 +24,11 @@ NOISE_MAX_LRA = 0.5              # ...with almost no change in level = constant 
 PREVIEW_LENGTHS = (30, 60, 90)   # usual store preview-clip lengths, seconds
 ALBUM_FOLDER_MAX_TRACKS = 100    # bigger folders (a loose-files root) say nothing about one album
 SEVERITY_ORDER = ["Broken", "Likely broken", "Check"]
+REASON_PROBLEM = "problem file"
+REASON_BLOCKED = "blocked by another file in its album"
+REASON_DISCARDED = "result thrown away by Plex"
+REASON_UNKNOWN = "no problem found"
+NOT_ANALYSED_REASONS = [REASON_PROBLEM, REASON_BLOCKED, REASON_DISCARDED, REASON_UNKNOWN]
 INTENTIONAL_SILENCE = r"silen|untitled|blank|hidden|4.33|pause|nothing|empty|\bgap\b|intermission|\bspace\b"
 
 # Words that mark a version, read only from brackets or a short trailing " - ..." part, so a song
@@ -137,13 +143,23 @@ def explain_open_error(err: str) -> str:
         return "it's a WAV-type file with an MP3-style tag, so the wrong type or damaged"
     if "moov atom not found" in err:
         return "the MP4/M4A index is missing (usually an incomplete download)"
+    if "matches no streams" in err:
+        return "there's no audio in the file"
+    if "Decode error rate" in err:
+        return "almost none of the audio decodes (damaged, or encrypted)"
+    if "Invalid data found when processing input" in err:
+        return "it isn't in a format that can be read (damaged, or not really audio)"
     line = next((l for l in err.splitlines() if l.strip()), err)
     return re.sub(r"\[[^\]]*@ [0-9a-fx]+\] ", "", line)[:120]
 
 
-def track_problems(t: dict, s: Optional[dict], fp: Optional[tuple], damage: Optional[tuple] = None) -> List[tuple]:
+def track_problems(t: dict, s: Optional[dict], fp: Optional[tuple], damage: Optional[tuple] = None,
+                   check: Optional[tuple] = None) -> List[tuple]:
     """Per-file problems: [(severity, problem, details)]. Uses Plex's loudness analysis (s), our
-    fingerprint (fp) and, if it was run, the full damage check (damage = (errors, first error))."""
+    fingerprint (fp), the file check of tracks Plex couldn't analyse (check = (problem, details))
+    and, if it was run, the full damage check (damage = (errors, first error))."""
+    if check:   # the root cause: what Plex measured for a file it can't decode (silence...) adds nothing
+        return [(FILECHECK_SEVERITY.get(check[0], "Broken"), check[0], check[1])]
     out = []
     s = s or {}
     peak, loud, lra = s.get("peak"), s.get("loudness"), s.get("lra")
@@ -229,23 +245,62 @@ class Results:
     versions: List[dict] = field(default_factory=list)
     check_by_ear: List[dict] = field(default_factory=list)
     broken: List[dict] = field(default_factory=list)
-    not_analysed: List[int] = field(default_factory=list)
+    not_analysed: List[dict] = field(default_factory=list)   # {"k", "reason", "details"}
     stats: dict = field(default_factory=dict)
+
+
+def album_key(t: dict):
+    """Plex's album, or (for track lists saved before albums were recorded) folder + album name."""
+    return t.get("album_id") or (os.path.dirname(t["file"]).lower(), t["album"].lower())
+
+
+def not_analysed_reasons(tracks: List[dict], checks: Dict[str, tuple]) -> List[dict]:
+    """Why each track has no sonic analysis. Plex analyses a whole album at once, and one file it
+    can't decode stops the whole album, so a fine track can be blocked by its album-mate."""
+    problem_files = defaultdict(list)
+    for t in tracks:
+        if t["file"] in checks:
+            problem_files[album_key(t)].append(t)
+    out = []
+    for k, t in enumerate(tracks):
+        if t.get("analysed"):
+            continue
+        if t["file"] in checks:
+            problem, details = checks[t["file"]]
+            out.append({"k": k, "reason": REASON_PROBLEM, "details": f"{problem}: {details}"})
+        elif problem_files.get(album_key(t)):
+            bad = problem_files[album_key(t)]
+            names = ", ".join(f"“{os.path.basename(b['file'])}” ({checks[b['file']][0]})" for b in bad[:3])
+            more = f" and {len(bad) - 3} more" if len(bad) > 3 else ""
+            out.append({"k": k, "reason": REASON_BLOCKED,
+                        "details": f"this file is fine, but Plex analyses whole albums and this album has "
+                                   f"{len(bad)} problem file{'s' if len(bad) != 1 else ''}: {names}{more}"})
+        elif t.get("plex_analysed"):
+            out.append({"k": k, "reason": REASON_DISCARDED,
+                        "details": "Plex ran the analysis but threw the result away, which happens mostly with "
+                                   "clips under 30 seconds. Nothing to fix"})
+        else:
+            out.append({"k": k, "reason": REASON_UNKNOWN,
+                        "details": "the file looks fine and so does its album; Plex may not have reached it yet "
+                                   "(new music waits for the nightly maintenance)"})
+    return out
 
 
 def analyse(tracks: List[dict], pairs: List[Tuple[int, int, float]], fps: Dict[str, tuple],
             streams: Dict[int, dict], rules: Rules, sonic_distance: Callable[[int, int], Optional[float]],
-            damage: Optional[Dict[str, tuple]] = None) -> Results:
+            damage: Optional[Dict[str, tuple]] = None, checks: Optional[Dict[str, tuple]] = None) -> Results:
     """tracks: all tracks. pairs: (track index, track index, sonic distance) close enough to check.
-    sonic_distance(i, j): Plex-equivalent distance between two tracks, or None if unknown."""
-    damage = damage or {}
+    sonic_distance(i, j): Plex-equivalent distance between two tracks, or None if unknown.
+    checks: {file: (problem, details)} from the file check of tracks Plex couldn't analyse."""
+    damage, checks = damage or {}, checks or {}
     folder_total = defaultdict(int)
     for t in tracks:
         folder_total[os.path.dirname(t["file"]).lower()] += 1
     res = Results(tracks=tracks, analysed=[k for k, t in enumerate(tracks) if t.get("analysed")])
-    res.not_analysed = [k for k, t in enumerate(tracks) if not t.get("analysed")]
+    res.not_analysed = not_analysed_reasons(tracks, checks)
 
-    problems = {k: track_problems(t, streams.get(t["id"]), fps.get(t["file"]), damage.get(t["file"]))
+    problems = {k: track_problems(t, streams.get(t["id"]), fps.get(t["file"]), damage.get(t["file"]),
+                                  checks.get(t["file"]))
                 for k, t in enumerate(tracks)}
     broken = {k for k, ps in problems.items() if any(p[0] == "Broken" for p in ps)}
     silent = {f for f, v in fps.items() if low_information(v[0])}
@@ -384,6 +439,7 @@ def analyse(tracks: List[dict], pairs: List[Tuple[int, int, float]], fps: Dict[s
             problem_tally[f"{p[0]}: {p[1]}"] += 1
     res.stats = {
         "tracks": len(tracks), "analysed": len(res.analysed), "not_analysed": len(res.not_analysed),
+        "not_analysed_reasons": {r: sum(1 for x in res.not_analysed if x["reason"] == r) for r in NOT_ANALYSED_REASONS},
         "close_pairs": len(pairs), "fingerprinted": len(fps),
         "fingerprint_errors": sum(1 for v in fps.values() if v[2]), "silent_files": len(silent),
         "verdicts": dict(verdicts),
