@@ -83,7 +83,9 @@ jobs:
           "$APP" gui --no-browser --port 8765 > gui.log 2>&1 &
           for i in $(seq 1 30); do grep -q "http://127.0.0.1" gui.log && break; sleep 1; done
           cat gui.log
-          curl -fsS http://127.0.0.1:8765/ | grep -q "Plex Sonic Doctor"
+          # save the page first: piping curl into grep -q fails (curl exit 23) once the page outgrows one write
+          curl -fsS -o page.html http://127.0.0.1:8765/
+          grep -q "Plex Sonic Doctor" page.html
           code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8765/api/state)
           echo "API without the session key: $code"
           test "$code" = "403"
