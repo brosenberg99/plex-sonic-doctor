@@ -112,8 +112,16 @@
       to garbage, won't open, stop early, aren't audio at all or are still encrypted. <b>Likely broken</b> covers songs that measure as pure silence, and albums
       where every track is the same clip. <b>Check</b> covers constant noise (often real noise music), intentional
       silence and missing files.</p>
+    <div class="view-switch" id="broken-view"><button data-view="albums" class="active">By album</button>
+      <button data-view="tracks">By track</button></div>
+    <p class="hint album-only">For replacing broken files an album at a time, for example by downloading iTunes
+      purchases again. After replacing an album's files, press <b>Recheck</b>: every audio file in its folder is played
+      all the way through, so you know straight away whether the new download worked, without waiting for Plex. A file
+      that plays leaves the broken counts (and loses a <i>Remove</i> mark, so it isn't moved by mistake). In a
+      folder of more than 200 loose tracks, only its broken files and any new ones are played.</p>
+    <div class="reason-chips album-only" id="album-statuses"></div>
     <div class="filters" data-for="broken">
-      <input type="search" name="q" placeholder="Search title, artist, album or folder">
+      <input type="search" name="q" placeholder="Search title, artist, album or folder (e.g. iTunes Media)">
       <select name="severity"><option value="">Any severity</option><option>Broken</option><option>Likely broken</option>
         <option>Check</option></select>
       <select name="problem"><option value="">Any problem</option><option>impossible audio levels</option>
@@ -122,10 +130,18 @@
         <option>constant full-volume noise</option><option>missing from disk</option>
         <option>not audio</option><option>unfinished iTunes download</option><option>copy-protected (DRM)</option>
         <option>empty file</option><option>couldn't be decoded</option></select>
+      <select name="status" class="album-only"><option value="">Any status</option><option value="todo">To redownload</option>
+        <option value="fixed">Fixed</option><option value="replaced">Fixed, old copies left</option>
+        <option value="broken">Still broken</option><option value="missing">Tracks missing</option>
+        <option value="skipped">Can't redownload</option></select>
+      <select name="sort" class="album-only"><option value="artist">Sort by artist</option><option value="album">Sort by album</option>
+        <option value="broken">Most broken tracks first</option><option value="status">Sort by status</option>
+        <option value="folder">Sort by folder</option></select>
     </div>
     <p class="hint">Files that aren't a copy of anything can be marked for removal here; they move to the holding
       folder like any other copy and can be put back.</p>
-    <div class="bulk"><span id="broken-total"></span></div>
+    <div class="bulk"><span id="broken-total"></span>
+      <button id="btn-recheck-list" class="album-only">Recheck every album in this list</button></div>
     <div id="broken-list" class="list"></div>
     <div class="pager" data-for="broken"></div>
   </section>

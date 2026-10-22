@@ -3,6 +3,7 @@ filtered, paged views of each report. No HTTP here, so it can be tested directly
 import json
 import os
 import threading
+import time
 from typing import Dict, List, Optional
 
 from .. import config, mover
@@ -39,6 +40,55 @@ class Decisions:
             os.replace(tmp, self.path)
 
 
+class AlbumChecks:
+    """The latest recheck of each album folder on the Possibly broken tab, and the albums marked
+    as ones that can't be downloaded again. Keyed by folder, saved as they change."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.lock = threading.Lock()
+        self.d: Dict[str, dict] = {}
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                self.d = json.load(f)
+
+    def get(self, folder: str) -> dict:
+        return self.d.get(folder) or {}
+
+    def update(self, folder: str, **fields) -> None:
+        with self.lock:
+            entry = {**self.d.get(folder, {}), **fields}
+            self.d[folder] = {k: v for k, v in entry.items() if v not in (None, False)}
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.d, fh)
+            os.replace(tmp, self.path)
+
+
+# A folder with more tracks than this is loose files, not an album: a recheck there plays only
+# its broken files and new ones, not every song.
+RECHECK_WHOLE_FOLDER_UP_TO = 200
+
+# An album's place in the redownload work: never rechecked, every file plays, a fresh copy plays
+# but the broken one is still next to it, something still won't play, a broken file is gone and
+# nothing replaced it, or marked as not available to download again.
+ALBUM_STATUSES = ("todo", "fixed", "replaced", "broken", "missing", "skipped")
+
+
+def album_status(check: dict, broken_files: List[str]) -> str:
+    if check.get("skipped"):
+        return "skipped"
+    if "files" not in check:
+        return "todo"
+    bad = [f for f in check["files"] if f["problem"]]
+    new_ok = sum(1 for f in check["files"] if f["new"] and not f["problem"])
+    broken = {os.path.normcase(f) for f in broken_files}
+    gone = sum(1 for f in check.get("gone", []) if os.path.normcase(f) in broken)
+    if bad:
+        return "replaced" if all(not f["new"] for f in bad) and new_ok >= len(bad) + gone else "broken"
+    return "missing" if gone > new_ok else "fixed"
+
+
 def _match_text(*fields) -> str:
     return " ".join(str(f) for f in fields if f).lower()
 
@@ -47,6 +97,7 @@ class State:
     def __init__(self):
         self.cfg = config.load()
         self.decisions = Decisions(os.path.join(config.data_dir(), "decisions.json"))
+        self.album_checks = AlbumChecks(os.path.join(config.data_dir(), "album-checks.json"))
         self.results: Optional[dict] = None
         self.moved: set = set()
         self.reload()
@@ -167,6 +218,130 @@ class State:
                            folder_flagged=b["folder_flagged"]) for b in p["items"]]
         return p
 
+    # ---------------------------------------------------------------- broken files by album
+    # For replacing broken files an album at a time (e.g. downloading iTunes purchases again):
+    # each album folder with a broken file, and whether its latest recheck found every file
+    # now plays all the way through.
+
+    def _folder_tracks(self) -> Dict[str, List[int]]:
+        cached = getattr(self, "_folders", None)
+        if cached is None or cached[0] is not self.results:
+            folders: Dict[str, List[int]] = {}
+            for k, t in enumerate(self.results["tracks"]):
+                folders.setdefault(os.path.dirname(t["file"]), []).append(k)
+            self._folders = cached = (self.results, folders)
+        return cached[1]
+
+    def _fixed_files(self) -> set:
+        """Files that played all the way through at their album's latest recheck."""
+        return {f["file"] for c in self.album_checks.d.values() for f in c.get("files", []) if not f["problem"]}
+
+    def albums(self, q="", severity="", problem="", status="", sort="artist") -> List[dict]:
+        """Album folders with a broken file still in the library (fixed ones too, so they show as
+        fixed), filtered and sorted. Each: folder, artist, album, broken (rows), tracks, status."""
+        if not self.results:
+            return []
+        T, by_folder = self.results["tracks"], {}
+        for b in self.results["broken"]:
+            if self._here(b["k"]):
+                by_folder.setdefault(os.path.dirname(T[b["k"]]["file"]), []).append(b)
+        folder_tracks = self._folder_tracks()
+        out = []
+        for folder, rows in by_folder.items():
+            ts = [T[b["k"]] for b in rows]
+            if severity and not any(b["problems"][0][0] == severity for b in rows):
+                continue
+            if problem and not any(problem == p[1] for b in rows for p in b["problems"]):
+                continue
+            artists = {t["artist"] for t in ts}
+            a = {"folder": folder, "album": ts[0]["album"], "artist": artists.pop() if len(artists) == 1 else "Various artists",
+                 "broken": rows, "tracks": sum(1 for k in folder_tracks.get(folder, []) if self._here(k)),
+                 "status": album_status(self.album_checks.get(folder), [t["file"] for t in ts])}
+            if q and q not in _match_text(a["album"], a["artist"], folder, *(t["title"] for t in ts)):
+                continue
+            out.append(a)
+        counts = {s: sum(1 for a in out if a["status"] == s) for s in ALBUM_STATUSES}
+        if status:
+            out = [a for a in out if a["status"] == status]
+        text = lambda s: (s or "").casefold()
+        keys = {
+            "artist": lambda a: (text(a["artist"]), text(a["album"])),
+            "album": lambda a: (text(a["album"]), text(a["artist"])),
+            "broken": lambda a: (-len(a["broken"]), text(a["artist"]), text(a["album"])),
+            "status": lambda a: (ALBUM_STATUSES.index(a["status"]), text(a["artist"]), text(a["album"])),
+            "folder": lambda a: text(a["folder"]),
+        }
+        out.sort(key=keys.get(sort, keys["artist"]))
+        self.album_counts = counts
+        return out
+
+    def albums_page(self, page=1, per=50, **filters) -> dict:
+        p = self._page(self.albums(**filters), page, per)
+        p["status_counts"] = self.album_counts if self.results else {s: 0 for s in ALBUM_STATUSES}
+        fixed = self._fixed_files()
+        items = []
+        for a in p["items"]:
+            check = self.album_checks.get(a["folder"])
+            problems: Dict[str, int] = {}
+            for b in a["broken"]:
+                problems[b["problems"][0][1]] = problems.get(b["problems"][0][1], 0) + 1
+            items.append({
+                "folder": a["folder"], "artist": a["artist"], "album": a["album"], "tracks": a["tracks"],
+                "status": a["status"], "checked": check.get("checked", ""), "problems": problems,
+                "broken": [dict(self.track(b["k"]), severity=b["problems"][0][0], removable=self.removable(b["k"]),
+                                fixed=self.results["tracks"][b["k"]]["file"] in fixed,
+                                problems=[{"severity": s, "problem": pr, "details": d} for s, pr, d in b["problems"]])
+                           for b in a["broken"]],
+                # what the recheck found worth showing: files that don't play, new files, files gone
+                "checked_files": len(check.get("files", [])),
+                "found": [f for f in check.get("files", []) if f["problem"] or f["new"]],
+                "gone": check.get("gone", []),
+            })
+        p["items"] = items
+        return p
+
+    def album_folders(self, **filters) -> List[str]:
+        return [a["folder"] for a in self.albums(**filters)]
+
+    def recheck_albums(self, folders: List[str], progress=lambda m, f=-1: None, should_stop=lambda: False) -> dict:
+        """Play every file in these album folders through, and save what was found. A broken file
+        that now plays loses a 'remove' decision, so a fresh download isn't moved by mistake."""
+        from .. import filecheck
+        known_albums = {a["folder"] for a in self.albums()}
+        folders = [f for f in folders if f in known_albums]
+        folder_tracks, T = self._folder_tracks(), self.results["tracks"]
+        broken_files = {T[b["k"]]["file"] for b in self.results["broken"]}
+        statuses: Dict[str, int] = {}
+        for n, folder in enumerate(folders):
+            if should_stop():
+                break
+            progress(f"Rechecking albums: {n + 1:,} of {len(folders):,}: {os.path.basename(folder)}", n / max(len(folders), 1))
+            known = [T[k]["file"] for k in folder_tracks.get(folder, []) if self._here(k)]
+            only = [f for f in known if f in broken_files] if len(known) > RECHECK_WHOLE_FOLDER_UP_TO else None
+            found = filecheck.recheck_folder(self.cfg.ffmpeg, folder, known, self.cfg.workers, only)
+            self.album_checks.update(folder, checked=time.strftime("%Y-%m-%d %H:%M"), skipped=None, **found)
+            now_play = [f["file"] for f in found["files"]
+                        if not f["problem"] and f["file"] in broken_files and self.decisions.get(f["file"]) == "remove"]
+            self.decisions.set_many(now_play, "")
+            st = album_status(self.album_checks.get(folder), [f for f in known if f in broken_files])
+            statuses[st] = statuses.get(st, 0) + 1
+        progress("Rechecking albums: done", 1)
+        return {"rechecked": sum(statuses.values()), "statuses": statuses}
+
+    def skip_album(self, folder: str, skipped: bool) -> None:
+        self.album_checks.update(folder, skipped=bool(skipped))
+
+    def mark_old_copies(self, folder: str) -> int:
+        """Where a fresh download plays but the broken file is still beside it: mark the broken
+        files that still don't play for removal (if they aren't a copy kept elsewhere)."""
+        T = self.results["tracks"]
+        k_of = {T[k]["file"]: k for k in self._folder_tracks().get(folder, [])}
+        files = [f["file"] for f in self.album_checks.get(folder).get("files", []) if f["problem"] and not f["new"]]
+        files = [f for f in files if f in k_of and self.removable(k_of[f]) and f not in self.moved
+                 and self.decisions.get(f) != "remove"]
+        self.decisions.set_many(files, "remove")
+        return len(files)
+
     def check_page(self, page=1, per=50, q="") -> dict:
         if not self.results:
             return self._page([], 1, per)
@@ -209,7 +384,9 @@ class State:
         return [s for s in self.results["versions"] if sum(self._here(v["k"]) for v in s["versions"]) > 1]
 
     def _live_broken(self) -> List[dict]:
-        return [b for b in self.results["broken"] if self._here(b["k"])]
+        """Also leaves out files that played all the way through at a recheck (replaced since the scan)."""
+        T, fixed = self.results["tracks"], self._fixed_files()
+        return [b for b in self.results["broken"] if self._here(b["k"]) and T[b["k"]]["file"] not in fixed]
 
     def _live_check(self) -> List[dict]:
         return [r for r in self.results["check_by_ear"] if self._here(r["a"]) and self._here(r["b"])]
@@ -247,6 +424,7 @@ class State:
             "version_songs": len(songs),
             "versions": sum(1 for x in songs for v in x["versions"] if self._here(v["k"])),
             "broken_files": len(broken),
+            "broken_fixed": len(self.results["broken"]) - len(broken) - sum(1 for b in self.results["broken"] if not self._here(b["k"])),
             "broken_by_severity": {sev: sum(1 for b in broken if b["problems"][0][0] == sev) for sev in SEVERITY_ORDER},
             "check_pairs": len(self._live_check()),
         })
@@ -265,7 +443,7 @@ class State:
         return k not in cached[1]
 
     def _problem_ks(self) -> List[int]:
-        ks = [b["k"] for b in self.results["broken"]]
+        ks = [b["k"] for b in self._live_broken()]
         ks += [r["k"] for r in self._live_not_analysed() if r["reason"] == REASON_PROBLEM]
         return sorted({k for k in ks if self.removable(k)})
 

@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -155,6 +156,79 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.stats(), before)
         self.request("POST", "/api/bulk", {"tab": "identical", "action": "clear", "filters": {}})
         self.request("POST", "/api/decide", {"files": [rows[0]["file"]], "decision": ""})
+
+    def test_album_status_rules(self):
+        from plex_sonic_doctor.gui.state import album_status
+        ok = lambda f, new=False: {"file": f, "new": new, "problem": ""}
+        bad = lambda f, new=False: {"file": f, "new": new, "problem": "unfinished iTunes download"}
+        self.assertEqual(album_status({}, ["a"]), "todo")
+        self.assertEqual(album_status({"files": [ok("a"), ok("b")], "gone": []}, ["a"]), "fixed")
+        self.assertEqual(album_status({"files": [bad("a"), ok("b")], "gone": []}, ["a"]), "broken")
+        self.assertEqual(album_status({"files": [bad("a"), ok("a 1", True)], "gone": []}, ["a"]), "replaced")
+        self.assertEqual(album_status({"files": [bad("a"), bad("a 1", True)], "gone": []}, ["a"]), "broken")
+        self.assertEqual(album_status({"files": [ok("b")], "gone": ["a"]}, ["a"]), "missing")
+        self.assertEqual(album_status({"files": [ok("b"), ok("a 1", True)], "gone": ["a"]}, ["a"]), "fixed")
+        self.assertEqual(album_status({"files": [ok("b")], "gone": ["c"]}, ["a"]), "fixed")   # c wasn't broken
+        self.assertEqual(album_status({"files": [bad("a")], "skipped": True}, ["a"]), "skipped")
+
+    def test_broken_by_album_and_recheck(self):
+        albums = json.loads(self.request("GET", "/api/broken-albums")[1])
+        self.assertEqual([(a["album"], a["status"], a["tracks"], len(a["broken"])) for a in albums["items"]],
+                         [("D", "todo", 2, 1)])
+        self.assertEqual(albums["status_counts"]["todo"], 1)
+        folder = albums["items"][0]["folder"]
+        self.assertEqual(json.loads(self.request("GET", "/api/broken-albums?status=fixed")[1])["total"], 0)
+
+        self.request("POST", "/api/album-skip", {"folder": folder, "skipped": True})
+        self.assertEqual(json.loads(self.request("GET", "/api/broken-albums")[1])["items"][0]["status"], "skipped")
+        self.request("POST", "/api/album-skip", {"folder": folder, "skipped": False})
+        if not shutil.which("ffmpeg"):
+            return self.skipTest("ffmpeg not installed")
+
+        page, fine = self.tracks[4]["file"], self.tracks[5]["file"]
+        originals = {}
+        for p in (page, fine):
+            with open(p, "rb") as f:
+                originals[p] = f.read()
+        tone = lambda p: subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=1",
+                                         "-c:a", "libmp3lame", "-f", "mp3", p], check=True)
+        copy = os.path.join(folder, "Not A Song 1.mp3")
+        try:
+            def recheck():
+                self.assertEqual(self.request("POST", "/api/recheck", {"folders": [folder, "/not/an/album"]})[0], 200)
+                job = self.wait_for_job()
+                self.assertEqual(job["result"]["rechecked"], 1, job)
+                return json.loads(self.request("GET", "/api/broken-albums")[1])["items"][0]
+
+            tone(fine)
+            a = recheck()                    # the web page still isn't audio
+            self.assertEqual(a["status"], "broken")
+            self.assertEqual([(os.path.basename(f["file"]), f["problem"]) for f in a["found"]], [("Not A Song.mp3", "not audio")])
+
+            tone(copy)                       # a fresh download beside it: mark the old one
+            a = recheck()
+            self.assertEqual(a["status"], "replaced")
+            r = json.loads(self.request("POST", "/api/mark-old-copies", {"folder": folder})[1])
+            self.assertEqual((r["changed"], r["marked"]["files"]), (1, 1))
+            os.remove(copy)
+
+            tone(page)                       # replaced where it was: fixed, and its Remove mark goes
+            a = recheck()
+            self.assertEqual((a["status"], a["checked_files"], a["broken"][0]["fixed"]), ("fixed", 2, True))
+            self.assertEqual(json.loads(self.request("GET", "/api/state")[1])["marked"]["files"], 0)
+            s = self.stats()
+            self.assertEqual((s["broken_files"], s["broken_fixed"]), (0, 1))
+            self.assertEqual(json.loads(self.request("GET", "/api/broken")[1])["total"], 0)
+            self.assertEqual(json.loads(self.request("GET", "/api/plan")[1])["files"], 0)
+        finally:
+            for p, data in originals.items():
+                with open(p, "wb") as f:
+                    f.write(data)
+            if os.path.exists(copy):
+                os.remove(copy)
+            self.app.state.album_checks.d.clear()
+            self.app.state.album_checks.update(folder)          # saves the cleared checks
+            self.request("POST", "/api/decide", {"files": [page], "decision": ""})
 
     def test_a_second_copy_cant_share_the_port(self):
         from plex_sonic_doctor.gui.server import _Server, make_handler

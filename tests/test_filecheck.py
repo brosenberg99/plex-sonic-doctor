@@ -84,6 +84,33 @@ class RealDecodeTests(unittest.TestCase):
             with open(bad, "wb") as f:
                 f.write(os.urandom(4000))
             self.assertEqual(filecheck.check_file("ffmpeg", bad)[0], "couldn't be decoded")
+            self.assertIsNone(filecheck.check_file("ffmpeg", good, whole=True))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_recheck_an_album_folder(self):
+        d = tempfile.mkdtemp(prefix="sonicdoctor_recheck_")
+        try:
+            tone = lambda name: subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=2",
+                                                "-c:a", "aac", os.path.join(d, name)], check=True)
+            tone("01 Song.m4a")
+            tone("02 Other 1.m4a")              # a fresh download saved next to the old one
+            with open(os.path.join(d, "02 Other.m4a"), "wb") as f:
+                f.write(m4a(b"drms", UNFINISHED))
+            with open(os.path.join(d, "cover.jpg"), "wb") as f:
+                f.write(b"not audio, not looked at")
+            known = [os.path.join(d, n) for n in ("01 Song.m4a", "02 Other.m4a", "03 Gone.m4a")]
+            r = filecheck.recheck_folder("ffmpeg", d, known, workers=2)
+            got = {os.path.basename(f["file"]): (f["new"], f["problem"]) for f in r["files"]}
+            self.assertEqual(got, {"01 Song.m4a": (False, ""), "02 Other 1.m4a": (True, ""),
+                                   "02 Other.m4a": (False, "unfinished iTunes download")})
+            self.assertEqual(r["gone"], [known[2]])
+            # a huge folder of loose files: only the broken ones (and new files) are played
+            r = filecheck.recheck_folder("ffmpeg", d, known, workers=2, only=[known[1]])
+            self.assertEqual(sorted(os.path.basename(f["file"]) for f in r["files"]), ["02 Other 1.m4a", "02 Other.m4a"])
+            self.assertEqual(r["gone"], [])
+            self.assertEqual(filecheck.recheck_folder("ffmpeg", os.path.join(d, "nope"), known[:1]),
+                             {"files": [], "gone": known[:1]})
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

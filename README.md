@@ -69,9 +69,13 @@ small window open while you use it.
    whole filtered list at once. Broken files and the problem files on **Not analysed** can be marked too
    (a file that's part of an identical group still keeps one copy). Decisions are saved as you go, and the
    bar at the bottom shows what's marked. The counts on every tab leave out what's already been moved.
-5. **Move & undo** previews the move, then moves the marked copies to the holding folder. Every
+5. **Possibly broken** has a **By album** view for replacing broken files an album at a time (for example,
+   downloading iTunes purchases again). After replacing an album, press **Recheck**: every file in its folder
+   is played all the way through, and the album shows as *Fixed*, *Still broken*, or *Fixed, old copies left*
+   (when the new download was saved next to the broken file). Filter by status to see what's left to do.
+6. **Move & undo** previews the move, then moves the marked copies to the holding folder. Every
    batch can be put back from the same page, all of it or just the files you search for.
-6. **Settings**: change what counts as identical (for example, lengths within 3 s instead of 2), then
+7. **Settings**: change what counts as identical (for example, lengths within 3 s instead of 2), then
    **Quick re-sort** to see the effect in about a minute and a half.
 
 **Or from the command line:**

@@ -108,6 +108,24 @@ class App:
             return s.versions_page(page(), **filt("q", "reason", "marked"))
         if route == ("GET", "/api/broken"):
             return s.broken_page(page(), **filt("q", "severity", "problem"))
+        if route == ("GET", "/api/broken-albums"):
+            return s.albums_page(page(), **filt("q", "severity", "problem", "status", "sort"))
+        if route == ("POST", "/api/recheck"):
+            if "folders" in body:
+                folders = list(body["folders"])
+            else:
+                f = body.get("filters", {})
+                folders = s.album_folders(**{k: (f.get(k, "").lower() if k == "q" else f.get(k, ""))
+                                             for k in ("q", "severity", "problem", "status")})
+            def job(progress, should_stop):
+                return s.recheck_albums(folders, progress, should_stop)
+            self.jobs.start("Recheck", job)
+            return {"ok": True, "albums": len(folders)}
+        if route == ("POST", "/api/album-skip"):
+            s.skip_album(body["folder"], body.get("skipped", True))
+            return {"ok": True}
+        if route == ("POST", "/api/mark-old-copies"):
+            return {"changed": s.mark_old_copies(body["folder"]), "marked": s.marked_summary()}
         if route == ("GET", "/api/check"):
             return s.check_page(page(), **filt("q"))
         if route == ("GET", "/api/unanalysed"):
@@ -211,7 +229,11 @@ class App:
             plex.request_rescan(plex.connect(cfg.plex_url, cfg.plex_token), cfg.sections)
             return {"ok": True}
         if route == ("POST", "/api/reveal"):
-            self.reveal(s.results["tracks"][int(body["k"])]["file"])
+            path = s.results["tracks"][int(body["k"])]["file"]
+            if body.get("folder"):     # the track's album folder, which is there even when the track isn't
+                self.reveal(os.path.dirname(path), folder=True)
+            else:
+                self.reveal(path)
             return {"ok": True}
         if route == ("POST", "/api/open-reports"):
             self.reveal(config.sub_dir("reports"), folder=True)

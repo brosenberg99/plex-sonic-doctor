@@ -85,8 +85,10 @@ def _web_page_title(head: bytes) -> str:
     return m.group(1).decode("utf-8", "replace").strip() if m else ""
 
 
-def check_file(ffmpeg: str, path: str) -> Optional[Tuple[str, str]]:
-    """None if the file looks like playable audio, else (problem, details)."""
+def check_file(ffmpeg: str, path: str, whole: bool = False) -> Optional[Tuple[str, str]]:
+    """None if the file looks like playable audio, else (problem, details). With whole, every
+    second of it is decoded and any decoding error counts: that's the check that a replaced
+    file now plays."""
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as f:
@@ -108,13 +110,53 @@ def check_file(ffmpeg: str, path: str) -> Optional[Tuple[str, str]]:
             found = None
         if found:
             return found
-    out = _run([ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0", "-t", str(DECODE_SECONDS), "-f", "null", "-"],
-               timeout=600)
+    limit = [] if whole else ["-t", str(DECODE_SECONDS)]
+    out = _run([ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0", *limit, "-f", "null", "-"], timeout=600)
+    err = out.stderr.decode("utf-8", "replace").strip()
     if out.returncode != 0:
         from .analysis import explain_open_error
-        err = out.stderr.decode("utf-8", "replace").strip() or "ffmpeg couldn't decode the file"
-        return ("couldn't be decoded", explain_open_error(err))
+        return ("couldn't be decoded", explain_open_error(err or "ffmpeg couldn't decode the file"))
+    if whole and err:
+        lines = err.splitlines()
+        return ("decoding errors", f"{len(lines):,} {'error' if len(lines) == 1 else 'errors'} while playing it "
+                                   f"through, e.g. {lines[0][:160]}")
     return None
+
+
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4p", ".m4b", ".aac", ".mp4", ".flac", ".alac", ".wav", ".aif", ".aiff",
+                    ".ogg", ".oga", ".opus", ".wma", ".ape", ".wv", ".mpc"}
+
+
+def recheck_folder(ffmpeg: str, folder: str, known: List[str], workers: int = 4, only: Optional[List[str]] = None) -> dict:
+    """Play every audio file now in an album folder all the way through. known is the folder's
+    files as of the last scan, so files that have appeared since (a fresh download saved next to
+    the old one, as "01 Song 1.m4a") and files that have gone are told apart. With only, just
+    those known files (and any new ones) are played: for a huge folder of loose files.
+    Returns {"files": [{"file", "new", "problem", "details"}], "gone": [file, ...]}."""
+    try:
+        here = sorted(os.path.join(folder, n) for n in os.listdir(folder)
+                      if os.path.splitext(n)[1].lower() in AUDIO_EXTENSIONS and os.path.isfile(os.path.join(folder, n)))
+    except FileNotFoundError:
+        here = []
+    known_set = {os.path.normcase(f) for f in known}
+    present = {os.path.normcase(f) for f in here}
+    gone = [f for f in known if os.path.normcase(f) not in present]
+    if only is not None:
+        keep = {os.path.normcase(f) for f in only}
+        here = [f for f in here if os.path.normcase(f) in keep or os.path.normcase(f) not in known_set]
+        gone = [f for f in gone if os.path.normcase(f) in keep]
+
+    def one(path):
+        try:
+            found = check_file(ffmpeg, path, whole=True)
+        except OSError as e:           # ffmpeg missing or not runnable: no verdict on the file
+            raise RuntimeError(f"Couldn't run ffmpeg ({ffmpeg}): {e}") from e
+        return {"file": path, "new": os.path.normcase(path) not in known_set,
+                "problem": found[0] if found else "", "details": found[1] if found else ""}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        files = list(pool.map(one, here))
+    return {"files": files, "gone": gone}
 
 
 def run_file_checks(conn, ffmpeg: str, tracks: List[dict], workers: int = 4,

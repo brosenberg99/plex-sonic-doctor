@@ -34,7 +34,7 @@ const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toas
 // ------------------------------------------------------------------ tabs and state
 
 let STATE = null;
-const views = { identical: { page: 1 }, versions: { page: 1 }, broken: { page: 1 }, check: { page: 1 }, unanalysed: { page: 1 } };
+const views = { identical: { page: 1 }, versions: { page: 1 }, broken: { page: 1, mode: "albums" }, check: { page: 1 }, unanalysed: { page: 1 } };
 let current = "overview";
 
 function showTab(name) {
@@ -82,7 +82,7 @@ function renderCards(s) {
     <div class="card" data-goto="versions"><div class="big">${num(s.version_songs)}</div>
       <div>songs with different versions</div><div class="sub">${num(s.versions)} versions in all</div></div>
     <div class="card" data-goto="broken"><div class="big">${num(s.broken_files)}</div>
-      <div>possibly broken files</div><div class="sub">${num(sev["Broken"])} broken, ${num(sev["Likely broken"])} likely, ${num(sev["Check"])} to check</div></div>
+      <div>possibly broken files</div><div class="sub">${num(sev["Broken"])} broken, ${num(sev["Likely broken"])} likely, ${num(sev["Check"])} to check${s.broken_fixed ? ` · ${num(s.broken_fixed)} fixed since the scan` : ""}</div></div>
     <div class="card" data-goto="unanalysed"><div class="big">${num(s.tracks)}</div><div>tracks</div>
       <div class="sub">${num(s.not_analysed)} without Plex's sonic analysis (see why) · last scan ${esc(STATE.results.created)}</div></div>`;
 }
@@ -136,6 +136,8 @@ function jobSummary(j) {
   const parts = [];
   if (r.moved != null) parts.push(`Moved ${num(r.moved)} ${r.moved === 1 ? "file" : "files"}`);
   if (r.restored != null) parts.push(`Put back ${num(r.restored)} ${r.restored === 1 ? "file" : "files"}`);
+  if (r.rechecked != null) parts.push(`Rechecked ${num(r.rechecked)} ${r.rechecked === 1 ? "album" : "albums"}` +
+    (Object.keys(r.statuses || {}).length ? ": " + Object.entries(r.statuses).map(([st, n]) => `${num(n)} ${STATUS[st][0].toLowerCase()}`).join(", ") : ""));
   if (pl.updated) parts.push(`updated ${num(pl.updated)} playlist ${pl.updated === 1 ? "entry" : "entries"}`);
   if (pl.restored) parts.push(`restored ${num(pl.restored)} playlist ${pl.restored === 1 ? "entry" : "entries"}`);
   const problems = [...(r.failed || []), ...(pl.failed || []), ...(pl.pending || [])];
@@ -174,14 +176,75 @@ async function loadList(name) {
   const qs = new URLSearchParams({ ...f, page: views[name].page }).toString();
   const list = $(`#${name}-list`);
   if (!STATE || !STATE.results) { list.innerHTML = `<div class="empty">No scan yet. Run one from the Overview tab.</div>`; return; }
-  const data = await api(`/api/${name}?${qs}`);
+  const byAlbum = name === "broken" && views.broken.mode === "albums";
+  const data = await api(`/api/${byAlbum ? "broken-albums" : name}?${qs}`);
   views[name].data = data;
-  const word = { identical: "groups", versions: "songs", broken: "files", check: "pairs", unanalysed: "tracks" }[name];
+  const word = byAlbum ? "albums" : { identical: "groups", versions: "songs", broken: "files", check: "pairs", unanalysed: "tracks" }[name];
   $(`#${name}-total`).textContent = `${num(data.total)} ${word}` + (data.pages > 1 ? ` · page ${data.page} of ${data.pages}` : "");
-  list.innerHTML = data.items.length ? data.items.map(RENDER[name]).join("") : `<div class="empty">Nothing matches these filters.</div>`;
+  list.innerHTML = data.items.length ? data.items.map(byAlbum ? RENDER.albums : RENDER[name]).join("") : `<div class="empty">Nothing matches these filters.</div>`;
   renderPager(name, data);
   if (name === "unanalysed") renderReasons();
+  if (byAlbum) renderAlbumStatuses(data.status_counts);
 }
+
+// ------------------------------------------------------------------ possibly broken, by album
+
+const STATUS = {
+  todo: ["To redownload", "not rechecked yet"],
+  fixed: ["Fixed", "every file plays all the way through"],
+  replaced: ["Fixed, old copies left", "a fresh download plays, but the broken file is still beside it"],
+  broken: ["Still broken", "a file still won't play"],
+  missing: ["Tracks missing", "a broken file is gone and nothing replaced it"],
+  skipped: ["Can't redownload", "marked as not available"],
+};
+function renderAlbumStatuses(counts) {
+  const chosen = $(`.filters[data-for=broken] [name=status]`).value;
+  const all = Object.values(counts || {}).reduce((a, b) => a + b, 0);
+  const done = (counts.fixed || 0) + (counts.replaced || 0);
+  $("#album-statuses").innerHTML = `<div class="progress-line"><b>${num(done)} of ${num(all)}</b> albums fixed` +
+    `<div class="bar small"><div style="width:${all ? Math.round(100 * done / all) : 0}%"></div></div></div>` +
+    Object.keys(STATUS).filter((st) => counts[st]).map((st) =>
+      `<button data-status="${st}" class="${chosen === st ? "active" : ""}"><b>${num(counts[st])}</b>${esc(STATUS[st][0])}<span>${esc(STATUS[st][1])}</span></button>`).join("");
+}
+$("#album-statuses").onclick = (e) => {
+  const b = e.target.closest("[data-status]");
+  if (!b) return;
+  const sel = $(`.filters[data-for=broken] [name=status]`);
+  sel.value = sel.value === b.dataset.status ? "" : b.dataset.status;
+  views.broken.page = 1;
+  loadList("broken");
+};
+$("#broken-view").onclick = (e) => {
+  const b = e.target.closest("[data-view]");
+  if (!b || b.dataset.view === views.broken.mode) return;
+  views.broken.mode = b.dataset.view;
+  views.broken.page = 1;
+  $$("#broken-view button").forEach((x) => x.classList.toggle("active", x === b));
+  $("#tab-broken").classList.toggle("tracks", b.dataset.view === "tracks");
+  loadList("broken");
+};
+const fileName = (p) => esc(p.split(/[\\/]/).pop());
+$("#broken-list").addEventListener("click", guard(async (e) => {
+  const box = e.target.closest("[data-folder]");
+  if (!box) return;
+  const folder = box.dataset.folder;
+  if (e.target.closest("[data-recheck]")) return startJob("/api/recheck", { folders: [folder] });
+  if (e.target.closest("[data-open-folder]")) return api("/api/reveal", { k: +box.dataset.k, folder: true });
+  const skip = e.target.closest("[data-skip]");
+  if (skip) { await api("/api/album-skip", { folder, skipped: skip.dataset.skip === "1" }); return loadList("broken"); }
+  if (e.target.closest("[data-mark-old]")) {
+    const r = await api("/api/mark-old-copies", { folder });
+    toast(r.changed ? `Marked ${num(r.changed)} old ${r.changed === 1 ? "copy" : "copies"} for removal.` : "Nothing to mark: the old copies are already marked, or are kept as copies elsewhere.");
+    renderMarked(r.marked); loadList("broken");
+  }
+}));
+$("#btn-recheck-list").onclick = guard(async () => {
+  await loadList("broken");
+  const total = views.broken.data ? views.broken.data.total : 0;
+  if (!total) return toast("No albums match these filters.");
+  if (!confirm(`Recheck the ${num(total)} albums these filters show? Every audio file in their folders is played all the way through, which takes a while for many albums. It can be stopped.`)) return;
+  await startJob("/api/recheck", { filters: filtersOf("broken") });
+});
 
 // The reasons on the Not analysed tab, with counts; clicking one filters the list to it.
 function renderReasons() {
@@ -264,6 +327,30 @@ const RENDER = {
       <td>${nameCell(t)}</td>
       <td style="width:38%" class="sub">${esc(t.details)}</td>
       <td class="num">${t.length}<div>${fmt(t)}</div></td></tr></table></div>`,
+
+  albums: (a) => `<div class="group album" data-folder="${esc(a.folder)}" data-k="${a.broken[0].k}">
+    <div class="group-head"><b>${esc(a.album || "(no album)")}</b> <span>${esc(a.artist)}</span>
+      <span class="status ${a.status}" title="${esc(STATUS[a.status][1])}">${esc(STATUS[a.status][0])}</span>
+      ${a.checked ? `<span>rechecked ${esc(a.checked)}</span>` : ""}
+      <span class="actions">
+        ${a.status === "replaced" ? `<button class="small" data-mark-old>Mark the old copies for removal</button>` : ""}
+        <button class="small" data-open-folder title="Show the album folder">📂 Folder</button>
+        <button class="small primary" data-recheck title="Play every file in the folder all the way through">Recheck</button>
+        <button class="link small" data-skip="${a.status === "skipped" ? 0 : 1}">${a.status === "skipped" ? "Can be redownloaded after all" : "Can't redownload"}</button>
+      </span></div>
+    <div class="album-body">
+      <div><b>${num(a.broken.length)} of ${num(a.tracks)}</b> tracks broken: <span class="sub">${Object.entries(a.problems).map(([p, n]) => `${esc(p)}${n > 1 ? ` (${num(n)})` : ""}`).join(", ")}</span></div>
+      <div class="path">${esc(a.folder)}</div>
+      ${a.checked ? `<div class="found">${a.status === "fixed" && !a.found.length && !a.gone.length ? `<div class="ok">All ${num(a.checked_files)} files play all the way through.</div>` : ""}
+        ${a.found.map((f) => `<div class="${f.problem ? "bad" : "ok"}">${f.new ? `<span class="tag">new since the scan</span> ` : ""}${fileName(f.file)}: ${f.problem ? `<b>${esc(f.problem)}</b> <span class="sub">${esc(f.details)}</span>` : "plays all the way through"}</div>`).join("")}
+        ${a.gone.map((f) => `<div class="bad"><span class="tag">gone</span> ${fileName(f)}</div>`).join("")}</div>` : ""}
+      <details><summary>Broken tracks (${num(a.broken.length)})</summary><table>
+        ${a.broken.map((t) => `<tr class="${rowClass(t)}"><td style="width:130px">${t.fixed ? `<span class="tag ok">plays now</span>` : `<span class="sev ${esc(t.severity.split(" ")[0])}">${esc(t.severity)}</span>`}
+          ${t.removable && !t.fixed ? `<div>${decisionSelect(t)}</div>` : ""}</td>
+          <td><div class="title">${esc(t.title)}</div>${where(t)}</td>
+          <td style="width:38%">${t.problems.map((p) => `<div><b>${esc(p.problem)}</b>: <span class="sub">${esc(p.details)}</span></div>`).join("")}</td>
+          <td>${playButtons(t)}</td></tr>`).join("")}</table></details>
+    </div></div>`,
 
   check: (p) => `<div class="group"><div class="group-head"><b>Audio match ${pct(p.match)}</b> <span>sonic distance ${p.sonic.toFixed(3)}</span></div>
     <table>${[p.a, p.b].map((t) => `<tr><td>${playButtons(t)}</td><td>${nameCell(t)}</td><td class="num">${t.length}</td><td class="num">${fmt(t)}</td></tr>`).join("")}</table></div>`,

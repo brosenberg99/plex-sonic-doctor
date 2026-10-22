@@ -116,3 +116,22 @@ label.option { background: var(--chip); padding: 10px 12px; border-radius: 8px; 
 .batch-head { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .batch-head .when { font-weight: 600; }
 .batch .some { margin-top: 8px; }
+
+.view-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin: 4px 0 10px; }
+.view-switch button { border: 0; border-radius: 0; padding: 6px 14px; }
+.view-switch button.active { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+#tab-broken.tracks .album-only { display: none !important; }
+.progress-line { display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 8px 12px; font-size: 14px; }
+button.small { padding: 3px 10px; font-size: 13px; }
+.group-head .actions { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.status { border-radius: 10px; padding: 1px 9px; font-size: 12px; font-weight: 600; background: var(--chip); color: var(--text); }
+.status.fixed, .status.replaced { background: var(--keep-bg); color: var(--keep-text); }
+.status.broken, .status.missing { background: var(--remove-bg); color: var(--remove-text); }
+.status.skipped { color: var(--muted); }
+.album-body { padding: 8px 12px; font-size: 14px; }
+.album-body details { margin-top: 6px; }
+.album-body summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.found { margin: 6px 0; font-size: 13px; }
+.found .ok { color: var(--keep-text); }
+.found .bad { color: var(--remove-text); }
+.tag.ok { background: var(--keep-bg); color: var(--keep-text); }
