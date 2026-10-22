@@ -135,3 +135,8 @@ button.small { padding: 3px 10px; font-size: 13px; }
 .found .ok { color: var(--keep-text); }
 .found .bad { color: var(--remove-text); }
 .tag.ok { background: var(--keep-bg); color: var(--keep-text); }
+.filters-more { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; flex-basis: 100%; }
+.filters-more input:not([type]) { width: 170px; }
+.filters-more .years input { width: 105px; }
+label.check.inline { display: inline-flex; align-items: center; margin: 0; font-size: 14px; }
+.tag.src { font-size: 11px; color: var(--muted); }

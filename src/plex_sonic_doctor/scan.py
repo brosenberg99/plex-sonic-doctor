@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from . import analysis, config, filecheck, fingerprint, mover, plex, plexdata, reports
+from . import analysis, config, filecheck, fingerprint, mover, plex, plexdata, reports, sources
 from .pathmap import PathMapper
 
 CANDIDATE_MAX_DISTANCE = 0.06   # Plex sonic distance at which a pair is worth fingerprinting
@@ -116,9 +116,30 @@ def run_scan(cfg: config.Config, progress: Callable = lambda m, f=-1: None, refr
     checks = {f: c for f, c in checks.items() if f in not_analysed}
     res = analysis.analyse(tracks, pairs, fps, streams, cfg.rules, sonic_distance, damage, checks)
     res.stats["fingerprint_method"] = why
+    check_stop()
+    # Where each listed file came from (iTunes Store, Bandcamp...): only the tracks in the lists.
+    listed = {tracks[k]["file"] for k in listed_tracks(res)}
+    conn = fingerprint.open_cache(os.path.join(cache, "fingerprints.sqlite3"))
+    try:
+        sources.ensure_sources(conn, listed, cfg.workers, refresh, progress, should_stop)
+        found = sources.load_sources(conn, listed)
+    finally:
+        conn.close()
+    for t in tracks:
+        t["source"] = found.get(t["file"], "")
     paths = reports.write(res, streams, config.sub_dir("reports"))
     progress("Done", 1)
     return res, paths
+
+
+def listed_tracks(res) -> set:
+    """Every track shown in any of the reports."""
+    ks = {c["k"] for g in res.identical for c in g["copies"]}
+    ks |= {v["k"] for s in res.versions for v in s["versions"]}
+    ks |= {b["k"] for b in res.broken}
+    ks |= {k for r in res.check_by_ear for k in (r["a"], r["b"])}
+    ks |= {r["k"] if isinstance(r, dict) else r for r in res.not_analysed}
+    return ks
 
 
 class _LazyServer:

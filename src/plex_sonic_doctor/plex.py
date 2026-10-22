@@ -59,9 +59,11 @@ def music_sections(server) -> List[Tuple[str, str, List[str]]]:
 def fetch_tracks(server, section_keys: List[str], mapper: PathMapper, progress: Progress = _noop) -> List[dict]:
     """Every track in the chosen music libraries, in pages of 5,000."""
     tracks = []
-    for key, title, _ in music_sections(server):
+    for key, title, locations in music_sections(server):
         if section_keys and key not in section_keys:
             continue
+        # longest first, so a library folder inside another one wins
+        roots = sorted(locations, key=len, reverse=True)
         start, page = 0, 5000
         while True:
             el = server.query(f"/library/sections/{key}/all?type=10"
@@ -86,6 +88,12 @@ def fetch_tracks(server, section_keys: List[str], mapper: PathMapper, progress: 
                     "plex_file": part.get("file"),
                     "file": mapper.to_local(part.get("file")),
                     "updated": t.get("updatedAt", ""),
+                    "album_artist": t.get("grandparentTitle", ""),
+                    "year": int(t.get("parentYear") or t.get("year") or 0) or None,
+                    "track": int(t.get("index") or 0) or None,
+                    "disc": int(t.get("parentIndex") or 0) or None,
+                    "added": int(t.get("addedAt") or 0) or None,
+                    "root": mapper.to_local(next((r for r in roots if _inside(part.get("file"), r)), "")),
                     "analysed": t.get("musicAnalysisVersion") is not None,
                 })
             start += len(items)
@@ -94,6 +102,11 @@ def fetch_tracks(server, section_keys: List[str], mapper: PathMapper, progress: 
             if not items or start >= total:
                 break
     return tracks
+
+
+def _inside(path: str, folder: str) -> bool:
+    folder = folder.rstrip("\\/")
+    return path.startswith(folder) and path[len(folder):len(folder) + 1] in ("\\", "/")
 
 
 def fetch_streams(server, tracks: List[dict], cache_path: str, workers: int = 8,

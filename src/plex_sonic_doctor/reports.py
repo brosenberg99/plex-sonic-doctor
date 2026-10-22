@@ -41,22 +41,22 @@ def write(res: Results, streams: Dict[int, dict], out_dir: str) -> Dict[str, str
     paths = {k: os.path.join(out_dir, v) for k, v in FILES.items()}
 
     f, w = _writer(paths["identical"])
-    w.writerow(["group", "copies", "status", "note", "suggestion", "title", "artist", "album", "length", "format",
+    w.writerow(["group", "copies", "status", "note", "suggestion", "title", "artist", "album", "source", "length", "format",
                 "kbps", "size_mb", "loudness_lu", "channels", "audio_match_to_keep", "other_versions", "file",
                 "plex_id", "decision"])
     for g in res.identical:
         for n, c in enumerate(g["copies"]):
             t, s = T[c["k"]], streams.get(T[c["k"]]["id"])
             w.writerow([g["group"], len(g["copies"]), g["status"], g["note"], "KEEP" if n == 0 else "remove?",
-                        t["title"], t["artist"], t["album"], fmt_dur(t["duration"]), t["codec"], t["bitrate"],
-                        f"{t['size'] / 1e6:.1f}", _loud(s), _channels(s),
+                        t["title"], t["artist"], t["album"], t.get("source", ""), fmt_dur(t["duration"]), t["codec"],
+                        t["bitrate"], f"{t['size'] / 1e6:.1f}", _loud(s), _channels(s),
                         "" if n == 0 else (_pct(c["match"]) if c["match"] is not None else "sonic only"),
                         f"see {g['other_versions']} in {FILES['versions']}" if g["other_versions"] else "",
                         t["file"], t["id"], ""])
     f.close()
 
     f, w = _writer(paths["versions"])
-    w.writerow(["group", "versions", "version", "title", "artist", "album", "length", "format", "kbps", "size_mb",
+    w.writerow(["group", "versions", "version", "title", "artist", "album", "source", "length", "format", "kbps", "size_mb",
                 "loudness_lu", "channels", "how_it_differs_from_version_1", "audio_match_to_version_1",
                 "identical_copies", "file", "plex_id", "decision"])
     for song in res.versions:
@@ -64,20 +64,20 @@ def write(res: Results, streams: Dict[int, dict], out_dir: str) -> Dict[str, str
             t, s = T[v["k"]], streams.get(T[v["k"]]["id"])
             same = (f"{v['identical_copies']} (group {v['identical_group']} in {FILES['identical']})"
                     if v["identical_copies"] else "0")
-            w.writerow([song["group"], len(song["versions"]), n, t["title"], t["artist"], t["album"],
+            w.writerow([song["group"], len(song["versions"]), n, t["title"], t["artist"], t["album"], t.get("source", ""),
                         fmt_dur(t["duration"]), t["codec"], t["bitrate"], f"{t['size'] / 1e6:.1f}", _loud(s),
                         _channels(s), "; ".join(v["reasons"]), _pct(v["match"]), same, t["file"], t["id"], ""])
     f.close()
 
     f, w = _writer(paths["broken"])
-    w.writerow(["severity", "problem", "details", "folder_flagged", "title", "artist", "album", "length", "format",
+    w.writerow(["severity", "problem", "details", "folder_flagged", "title", "artist", "album", "source", "length", "format",
                 "kbps", "loudness_lu", "peak", "file", "plex_id", "notes"])
     for b in res.broken:
         t, s = T[b["k"]], streams.get(T[b["k"]]["id"]) or {}
         ps = b["problems"]
         w.writerow([ps[0][0], "; ".join(p[1] for p in ps), "; ".join(p[2] for p in ps), b["folder_flagged"],
-                    t["title"], t["artist"], t["album"], fmt_dur(t["duration"]), t["codec"], t["bitrate"],
-                    _loud(s), "" if s.get("peak") is None else f"{s['peak']:.2f}", t["file"], t["id"], ""])
+                    t["title"], t["artist"], t["album"], t.get("source", ""), fmt_dur(t["duration"]), t["codec"],
+                    t["bitrate"], _loud(s), "" if s.get("peak") is None else f"{s['peak']:.2f}", t["file"], t["id"], ""])
     f.close()
 
     f, w = _writer(paths["check"])
@@ -90,11 +90,12 @@ def write(res: Results, streams: Dict[int, dict], out_dir: str) -> Dict[str, str
     f.close()
 
     f, w = _writer(paths["not_analysed"])
-    w.writerow(["reason", "details", "title", "artist", "album", "length", "format", "file", "plex_id"])
+    w.writerow(["reason", "details", "title", "artist", "album", "source", "length", "format", "file", "plex_id"])
     order = {r: n for n, r in enumerate(NOT_ANALYSED_REASONS)}
     for r in sorted(res.not_analysed, key=lambda r: (order.get(r["reason"], 9), T[r["k"]]["file"].lower())):
         t = T[r["k"]]
-        w.writerow([r["reason"], r["details"], t["title"], t["artist"], t["album"], fmt_dur(t["duration"]), t["codec"],
+        w.writerow([r["reason"], r["details"], t["title"], t["artist"], t["album"], t.get("source", ""),
+                    fmt_dur(t["duration"]), t["codec"],
                     t["file"], t["id"]])
     f.close()
 
@@ -140,6 +141,7 @@ def _write_json(res: Results, streams, path):
         s = streams.get(t["id"]) or {}
         loud = s.get("loudness")
         return {**{k: t[k] for k in ("id", "title", "artist", "album", "duration", "codec", "bitrate", "size", "file")},
+                **{k: t.get(k) for k in ("album_artist", "year", "track", "disc", "added", "root", "source")},
                 "loudness": None if loud is None or loud == float("-inf") else loud, "silent": loud == float("-inf"),
                 "peak": s.get("peak"), "channels": s.get("channels")}
     data = {

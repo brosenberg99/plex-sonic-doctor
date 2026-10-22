@@ -63,7 +63,10 @@ small window open while you use it.
 1. **Setup** walks you through connecting to Plex and finding your files (once).
 2. **Overview**: press **Scan library**. A progress bar shows how far it is; you can stop it any time.
 3. **Identical copies**, **Different versions**, **Possibly broken**, **Check by ear** and **Not analysed**
-   show the results. Each has filters (search, status, notes, format, reasons). Each track has **▶ start** and
+   show the results. Each has its own filters (search, status, notes, format, reasons), plus the same
+   **artist, album, folder, source and year** filters and a **sort** menu on every tab. *Source* is where a file
+   came from, read from the marks stores leave in its tags: iTunes Store, Bandcamp, Amazon, YouTube, SoundCloud,
+   CD rip, or Unknown (only the verdict is kept, never the tags). Each track has **▶ start** and
    **▶ middle** buttons that play a 30-second clip, and a 📂 button that shows the file in its folder.
 4. Pick **Remove** for copies you don't want, or use **Mark the suggested copies for removal** to do a
    whole filtered list at once. Broken files and the problem files on **Not analysed** can be marked too

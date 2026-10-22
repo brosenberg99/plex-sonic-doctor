@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from .. import __version__, config, fingerprint, mover, plex, plexdata, plexlists, scan, setup_wizard
 from ..config import PathMap
 from ..pathmap import PathMapper, share_found, suggest_map
-from .state import State
+from .state import COMMON_FILTERS, State
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -89,7 +89,9 @@ class App:
         s, cfg = self.state, self.state.cfg
         route = (method, path)
         page = lambda: int(q.get("page", 1))
-        filt = lambda *names: {n: q.get(n, "").lower() if n == "q" else q.get(n, "") for n in names}
+        # every list also takes the shared filters (artist, album, folder, source, years) and a sort
+        filt = lambda *names: {n: q.get(n, "").lower() if n == "q" else q.get(n, "")
+                               for n in (*names, *COMMON_FILTERS, "sort", "desc")}
 
         if route == ("GET", "/api/state"):
             backend, why = fingerprint.detect(cfg.ffmpeg, cfg.fpcalc)
@@ -109,14 +111,16 @@ class App:
         if route == ("GET", "/api/broken"):
             return s.broken_page(page(), **filt("q", "severity", "problem"))
         if route == ("GET", "/api/broken-albums"):
-            return s.albums_page(page(), **filt("q", "severity", "problem", "status", "sort"))
+            return s.albums_page(page(), **filt("q", "severity", "problem", "status"))
+        if route == ("GET", "/api/facets"):
+            return s.facets(q.get("tab", ""))
         if route == ("POST", "/api/recheck"):
             if "folders" in body:
                 folders = list(body["folders"])
             else:
                 f = body.get("filters", {})
                 folders = s.album_folders(**{k: (f.get(k, "").lower() if k == "q" else f.get(k, ""))
-                                             for k in ("q", "severity", "problem", "status")})
+                                             for k in ("q", "severity", "problem", "status", *COMMON_FILTERS)})
             def job(progress, should_stop):
                 return s.recheck_albums(folders, progress, should_stop)
             self.jobs.start("Recheck", job)
@@ -136,13 +140,14 @@ class App:
         if route == ("POST", "/api/bulk"):
             f = body.get("filters", {})
             f = {k: (v.lower() if k == "q" else v) for k, v in f.items()}
+            pick = lambda *keys: {k: f.get(k, "") for k in (*keys, *COMMON_FILTERS)}
             if body["tab"] == "unanalysed" and body["action"] == "problems":
-                n = s.mark_problem_files(**{k: f.get(k, "") for k in ("q", "reason")})
+                n = s.mark_problem_files(**pick("q", "reason"))
             elif body["action"] == "suggested":
-                n = s.mark_suggested(**{k: f.get(k, "") for k in ("q", "status", "note", "marked", "fmt")})
+                n = s.mark_suggested(**pick("q", "status", "note", "marked", "fmt"))
             else:
                 keys = ("q", "status", "note", "marked", "fmt") if body["tab"] == "identical" else ("q", "reason", "marked")
-                n = s.clear_filtered(body["tab"], **{k: f.get(k, "") for k in keys})
+                n = s.clear_filtered(body["tab"], **pick(*keys))
             return {"changed": n, "marked": s.marked_summary()}
 
         # ---- scanning

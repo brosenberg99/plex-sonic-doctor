@@ -230,6 +230,38 @@ class GuiTests(unittest.TestCase):
             self.app.state.album_checks.update(folder)          # saves the cleared checks
             self.request("POST", "/api/decide", {"files": [page], "decision": ""})
 
+    def test_shared_filters_sorts_and_facets(self):
+        get = lambda path: json.loads(self.request("GET", path)[1])
+        titles = lambda d: [g["versions"][0]["title"] for g in d["items"]]
+        self.assertEqual(get("/api/identical?folder=b")["total"], 1)          # any copy in folder B
+        self.assertEqual(get("/api/identical?folder=c")["total"], 0)
+        self.assertEqual(get("/api/identical?artist=x")["total"], 1)
+        self.assertEqual(get("/api/identical?artist=nobody")["total"], 0)
+        self.assertEqual(get("/api/identical?source=Bandcamp")["total"], 0)
+        self.assertEqual(get("/api/identical?year_from=1990")["total"], 0)     # no years in these results
+        self.assertEqual(get("/api/unanalysed?sort=title")["items"][0]["title"], "Fine Song")
+        self.assertEqual(get("/api/unanalysed?sort=title&desc=1")["items"][0]["title"], "Not A Song")
+        self.assertEqual(titles(get("/api/versions?sort=title")), ["Song Two"])
+        self.assertEqual(get("/api/broken?folder=d")["total"], 1)
+        self.assertEqual(get("/api/broken-albums?artist=y&sort=source")["total"], 1)
+        f = get("/api/facets?tab=unanalysed")
+        self.assertEqual((f["artists"], f["albums"], f["folders"]), (["Y"], ["D"], {"D": 2}))
+        self.assertEqual(f["sources"], {"Not read yet": 2})
+        # bulk actions take the shared filters too
+        r = json.loads(self.request("POST", "/api/bulk", {"tab": "identical", "action": "suggested",
+                                                          "filters": {"folder": "nowhere"}})[1])
+        self.assertEqual(r["changed"], 0)
+
+    def test_top_folders(self):
+        from plex_sonic_doctor.gui.state import LOOSE, top_folders
+        ts = [{"file": "/m/iTunes/Media/a.m4a", "root": "/m"}, {"file": "/m/b.mp3", "root": "/m/"},
+              {"file": "H:\\Music\\Artist\\Album\\c.mp3", "root": "H:\\Music"}]
+        top_folders(ts)
+        self.assertEqual([t["top"] for t in ts], ["iTunes", LOOSE, "Artist"])
+        old = [{"file": os.path.join("x", "Music", "A", "1.mp3")}, {"file": os.path.join("x", "Music", "B", "2.mp3")}]
+        top_folders(old)                   # no library folder saved: the shared folder stands in
+        self.assertEqual([t["top"] for t in old], ["A", "B"])
+
     def test_a_second_copy_cant_share_the_port(self):
         from plex_sonic_doctor.gui.server import _Server, make_handler
         with self.assertRaises(OSError):

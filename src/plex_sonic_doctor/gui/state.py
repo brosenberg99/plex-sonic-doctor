@@ -2,6 +2,7 @@
 filtered, paged views of each report. No HTTP here, so it can be tested directly."""
 import json
 import os
+import re
 import threading
 import time
 from typing import Dict, List, Optional
@@ -93,6 +94,48 @@ def _match_text(*fields) -> str:
     return " ".join(str(f) for f in fields if f).lower()
 
 
+# Filters and sorts every track list has, on top of its own. A group (identical copies, a song's
+# versions, a pair, an album) is shown when any one of its tracks passes all the filters, and is
+# sorted by its first track (the suggested keep, version 1).
+COMMON_FILTERS = ("artist", "album", "folder", "source", "year_from", "year_to")
+LOOSE = "(loose files)"
+NOT_READ = "Not read yet"
+_fold = lambda v: (v or "").casefold()
+TRACK_SORTS = {
+    "artist": lambda t: (_fold(t["artist"]), _fold(t["album"]), t.get("disc") or 0, t.get("track") or 0, _fold(t["title"])),
+    "album": lambda t: (_fold(t["album"]), _fold(t["artist"]), t.get("disc") or 0, t.get("track") or 0),
+    "title": lambda t: (_fold(t["title"]), _fold(t["artist"])),
+    "folder": lambda t: (_fold(t.get("top")), _fold(t["file"])),
+    "source": lambda t: (_fold(t.get("source") or NOT_READ), _fold(t["artist"]), _fold(t["album"])),
+    "year": lambda t: (t.get("year") or 9999, _fold(t["artist"]), _fold(t["album"])),
+    "added": lambda t: (-(t.get("added") or 0), _fold(t["artist"])),
+}
+
+
+def _int(v) -> Optional[int]:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def top_folders(tracks: List[dict]) -> None:
+    """Give each track its "top": the first folder under its library folder, or LOOSE for a file
+    straight in it. Scans before this version didn't save the library folder: then the folder
+    all the files share stands in for it."""
+    shared = ""
+    if any(not t.get("root") for t in tracks):
+        try:
+            shared = os.path.commonpath([os.path.dirname(t["file"]) for t in tracks]) if tracks else ""
+        except ValueError:          # files on different drives
+            shared = ""
+    for t in tracks:
+        root = (t.get("root") or shared).rstrip("\\/")
+        rel = t["file"][len(root):] if root and t["file"].startswith(root) else t["file"]
+        parts = [x for x in re.split(r"[\\/]", rel) if x]
+        t["top"] = parts[0] if len(parts) > 1 else LOOSE
+
+
 class State:
     def __init__(self):
         self.cfg = config.load()
@@ -111,6 +154,7 @@ class State:
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 self.results = json.load(f)
+            top_folders(self.results["tracks"])
         self.refresh_moved()
 
     def refresh_moved(self) -> None:
@@ -121,18 +165,65 @@ class State:
         return {"k": k, "id": t["id"], "title": t["title"], "artist": t["artist"], "album": t["album"],
                 "length": fmt_dur(t["duration"]), "duration": t["duration"], "codec": t["codec"],
                 "bitrate": t["bitrate"], "size": t["size"], "file": t["file"],
+                "year": t.get("year"), "album_artist": t.get("album_artist") or "", "added": t.get("added"),
+                "source": t.get("source") or NOT_READ, "top": t["top"],
                 "loudness": t.get("loudness"), "silent": t.get("silent"), "peak": t.get("peak"),
                 "channels": {1: "mono", 2: "stereo"}.get(t.get("channels"), "" if not t.get("channels") else f"{t['channels']:.0f} ch"),
                 "decision": self.decisions.get(t["file"]), "moved": t["file"] in self.moved}
 
     # ---------------------------------------------------------------- views
 
+    def _track_ok(self, t: dict, f: dict) -> bool:
+        if f.get("artist") and f["artist"].lower() not in _match_text(t["artist"], t.get("album_artist")):
+            return False
+        if f.get("album") and f["album"].lower() not in t["album"].lower():
+            return False
+        if f.get("folder") and f["folder"].lower() not in t["top"].lower():
+            return False
+        if f.get("source") and (t.get("source") or NOT_READ) != f["source"]:
+            return False
+        lo, hi, year = _int(f.get("year_from")), _int(f.get("year_to")), t.get("year")
+        if (lo or hi) and not year:
+            return False
+        return not (lo and year < lo or hi and year > hi)
+
+    def _refine(self, items: list, ks_of, f: dict, own_sorts: Optional[dict] = None) -> list:
+        """The filters and sort every list shares. ks_of(item) gives an item's tracks."""
+        T = self.results["tracks"]
+        if any(f.get(k) for k in COMMON_FILTERS):
+            items = [it for it in items if any(self._track_ok(T[k], f) for k in ks_of(it))]
+        sort, desc = f.get("sort", ""), bool(f.get("desc"))
+        key = (own_sorts or {}).get(sort)
+        if key is None and sort in TRACK_SORTS:
+            key = lambda it, by=TRACK_SORTS[sort]: by(T[ks_of(it)[0]])
+        if key:
+            return sorted(items, key=key, reverse=desc)
+        return items[::-1] if desc else items
+
+    def facets(self, tab: str) -> dict:
+        """What the shared filters can offer on one tab: its artists, albums, folders, sources, years."""
+        if not self.results:
+            return {}
+        ks = {"identical": lambda: [c["k"] for g in self._live_identical() for c in g["copies"]],
+              "versions": lambda: [v["k"] for x in self._live_versions() for v in x["versions"]],
+              "broken": lambda: [b["k"] for b in self.results["broken"] if self._here(b["k"])],
+              "check": lambda: [k for r in self._live_check() for k in (r["a"], r["b"])],
+              "unanalysed": lambda: [r["k"] for r in self._live_not_analysed()]}[tab]()
+        T = self.results["tracks"]
+        count = lambda vals: dict(sorted(_count(vals).items(), key=lambda x: _fold(x[0])))
+        years = [T[k]["year"] for k in ks if T[k].get("year")]
+        return {"artists": sorted({T[k]["artist"] for k in ks if T[k]["artist"]}, key=_fold)[:5000],
+                "albums": sorted({T[k]["album"] for k in ks if T[k]["album"]}, key=_fold)[:5000],
+                "folders": count(T[k]["top"] for k in ks),
+                "sources": count(T[k].get("source") or NOT_READ for k in ks),
+                "years": [min(years), max(years)] if years else []}
+
     def _page(self, items: list, page: int, per: int) -> dict:
         page = max(1, page)
         return {"total": len(items), "page": page, "per": per, "pages": max(1, -(-len(items) // per)),
                 "items": items[(page - 1) * per: page * per]}
 
-    def identical_groups(self, q="", status="", note="", marked="", fmt="") -> List[dict]:
+    def identical_groups(self, q="", status="", note="", marked="", fmt="", **common) -> List[dict]:
         if not self.results:
             return []
         T, out = self.results["tracks"], []
@@ -159,7 +250,9 @@ class State:
             if q and q not in _match_text(*(f"{T[k]['title']} {T[k]['artist']} {T[k]['album']} {T[k]['file']}" for k in ks)):
                 continue
             out.append(g)
-        return out
+        return self._refine(out, lambda g: [c["k"] for c in g["copies"]], common, {
+            "space": lambda g: -sum(T[c["k"]]["size"] for c in g["copies"][1:]),
+            "copies": lambda g: -len(g["copies"])})
 
     def identical_page(self, page=1, per=40, **filters) -> dict:
         groups = self.identical_groups(**filters)
@@ -171,7 +264,7 @@ class State:
                       for g in p["items"]]
         return p
 
-    def version_songs(self, q="", reason="", marked="") -> List[dict]:
+    def version_songs(self, q="", reason="", marked="", **common) -> List[dict]:
         if not self.results:
             return []
         T, out = self.results["tracks"], []
@@ -188,7 +281,8 @@ class State:
             if q and q not in _match_text(*(f"{T[k]['title']} {T[k]['artist']} {T[k]['album']} {T[k]['file']}" for k in ks)):
                 continue
             out.append(song)
-        return out
+        return self._refine(out, lambda x: [v["k"] for v in x["versions"]], common,
+                            {"versions": lambda x: -len(x["versions"])})
 
     def versions_page(self, page=1, per=40, **filters) -> dict:
         p = self._page(self.version_songs(**filters), page, per)
@@ -199,7 +293,7 @@ class State:
                       for s in p["items"]]
         return p
 
-    def broken_page(self, page=1, per=100, q="", severity="", problem="") -> dict:
+    def broken_page(self, page=1, per=100, q="", severity="", problem="", **common) -> dict:
         if not self.results:
             return self._page([], 1, per)
         T, rows = self.results["tracks"], []
@@ -212,7 +306,7 @@ class State:
             if q and q not in _match_text(t["title"], t["artist"], t["album"], t["file"]):
                 continue
             rows.append(b)
-        p = self._page(rows, page, per)
+        p = self._page(self._refine(rows, lambda b: [b["k"]], common), page, per)
         p["items"] = [dict(self.track(b["k"]), severity=b["problems"][0][0], removable=self.removable(b["k"]),
                            problems=[{"severity": s, "problem": pr, "details": d} for s, pr, d in b["problems"]],
                            folder_flagged=b["folder_flagged"]) for b in p["items"]]
@@ -236,7 +330,7 @@ class State:
         """Files that played all the way through at their album's latest recheck."""
         return {f["file"] for c in self.album_checks.d.values() for f in c.get("files", []) if not f["problem"]}
 
-    def albums(self, q="", severity="", problem="", status="", sort="artist") -> List[dict]:
+    def albums(self, q="", severity="", problem="", status="", sort="artist", desc="", **common) -> List[dict]:
         """Album folders with a broken file still in the library (fixed ones too, so they show as
         fixed), filtered and sorted. Each: folder, artist, album, broken (rows), tracks, status."""
         if not self.results:
@@ -254,12 +348,16 @@ class State:
             if problem and not any(problem == p[1] for b in rows for p in b["problems"]):
                 continue
             artists = {t["artist"] for t in ts}
+            sources = _count(t.get("source") or NOT_READ for t in ts)
             a = {"folder": folder, "album": ts[0]["album"], "artist": artists.pop() if len(artists) == 1 else "Various artists",
+                 "source": max(sources, key=sources.get),
                  "broken": rows, "tracks": sum(1 for k in folder_tracks.get(folder, []) if self._here(k)),
                  "status": album_status(self.album_checks.get(folder), [t["file"] for t in ts])}
             if q and q not in _match_text(a["album"], a["artist"], folder, *(t["title"] for t in ts)):
                 continue
             out.append(a)
+        if any(common.get(k) for k in COMMON_FILTERS):
+            out = [a for a in out if any(self._track_ok(T[b["k"]], common) for b in a["broken"])]
         counts = {s: sum(1 for a in out if a["status"] == s) for s in ALBUM_STATUSES}
         if status:
             out = [a for a in out if a["status"] == status]
@@ -270,8 +368,12 @@ class State:
             "broken": lambda a: (-len(a["broken"]), text(a["artist"]), text(a["album"])),
             "status": lambda a: (ALBUM_STATUSES.index(a["status"]), text(a["artist"]), text(a["album"])),
             "folder": lambda a: text(a["folder"]),
+            "source": lambda a: (text(a["source"]), text(a["artist"]), text(a["album"])),
+            "year": lambda a: (T[a["broken"][0]["k"]].get("year") or 9999, text(a["artist"]), text(a["album"])),
+            "added": lambda a: (-(T[a["broken"][0]["k"]].get("added") or 0), text(a["artist"])),
+            "title": lambda a: (text(a["album"]), text(a["artist"])),
         }
-        out.sort(key=keys.get(sort, keys["artist"]))
+        out.sort(key=keys.get(sort, keys["artist"]), reverse=bool(desc))
         self.album_counts = counts
         return out
 
@@ -287,6 +389,7 @@ class State:
                 problems[b["problems"][0][1]] = problems.get(b["problems"][0][1], 0) + 1
             items.append({
                 "folder": a["folder"], "artist": a["artist"], "album": a["album"], "tracks": a["tracks"],
+                "source": a["source"], "year": self.results["tracks"][a["broken"][0]["k"]].get("year"),
                 "status": a["status"], "checked": check.get("checked", ""), "problems": problems,
                 "broken": [dict(self.track(b["k"]), severity=b["problems"][0][0], removable=self.removable(b["k"]),
                                 fixed=self.results["tracks"][b["k"]]["file"] in fixed,
@@ -342,29 +445,31 @@ class State:
         self.decisions.set_many(files, "remove")
         return len(files)
 
-    def check_page(self, page=1, per=50, q="") -> dict:
+    def check_page(self, page=1, per=50, q="", **common) -> dict:
         if not self.results:
             return self._page([], 1, per)
         T = self.results["tracks"]
         rows = [r for r in self._live_check()
                 if not q or q in _match_text(T[r["a"]]["title"], T[r["a"]]["artist"], T[r["a"]]["file"],
                                              T[r["b"]]["title"], T[r["b"]]["artist"], T[r["b"]]["file"])]
+        rows = self._refine(rows, lambda r: [r["a"], r["b"]], common, {"match": lambda r: (r["match"] or 0)})
         p = self._page(rows, page, per)
         p["items"] = [{"match": r["match"], "sonic": r["sonic"], "a": self.track(r["a"]), "b": self.track(r["b"])}
                       for r in p["items"]]
         return p
 
-    def not_analysed_rows(self, q="", reason="") -> List[dict]:
+    def not_analysed_rows(self, q="", reason="", **common) -> List[dict]:
         if not self.results:
             return []
         T = self.results["tracks"]
-        return [r for r in self._live_not_analysed()
+        rows = [r for r in self._live_not_analysed()
                 if (not reason or r["reason"] == reason)
                 and (not q or q in _match_text(T[r["k"]]["title"], T[r["k"]]["artist"], T[r["k"]]["album"],
                                                T[r["k"]]["file"], r["details"]))]
+        return self._refine(rows, lambda r: [r["k"]], common)
 
-    def not_analysed_page(self, page=1, per=100, q="", reason="") -> dict:
-        p = self._page(self.not_analysed_rows(q, reason), page, per)
+    def not_analysed_page(self, page=1, per=100, q="", reason="", **common) -> dict:
+        p = self._page(self.not_analysed_rows(q, reason, **common), page, per)
         p["items"] = [dict(self.track(r["k"]), reason=r["reason"], details=r["details"],
                            removable=r["reason"] == REASON_PROBLEM and self.removable(r["k"]))
                       for r in p["items"]]
@@ -447,10 +552,10 @@ class State:
         ks += [r["k"] for r in self._live_not_analysed() if r["reason"] == REASON_PROBLEM]
         return sorted({k for k in ks if self.removable(k)})
 
-    def mark_problem_files(self, q="", reason="") -> int:
+    def mark_problem_files(self, q="", reason="", **common) -> int:
         """In the Not analysed list as filtered: mark every problem file 'remove' (if undecided)."""
         T = self.results["tracks"]
-        files = [T[r["k"]]["file"] for r in self.not_analysed_rows(q, reason)
+        files = [T[r["k"]]["file"] for r in self.not_analysed_rows(q, reason, **common)
                  if r["reason"] == REASON_PROBLEM and self.removable(r["k"])]
         files = [f for f in files if not self.decisions.get(f) and f not in self.moved]
         self.decisions.set_many(files, "remove")
@@ -515,3 +620,10 @@ class State:
 
     def plan(self) -> mover.Plan:
         return mover.plan_moves(self.move_rows(), self.cfg.holding_dir)
+
+
+def _count(values) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for v in values:
+        out[v] = out.get(v, 0) + 1
+    return out

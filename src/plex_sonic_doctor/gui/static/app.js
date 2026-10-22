@@ -158,18 +158,69 @@ $("#btn-open-reports").onclick = guard(() => api("/api/open-reports", {}));
 
 function filtersOf(name) {
   const f = {};
-  $$(`.filters[data-for=${name}] [name]`).forEach((el) => (f[el.name] = el.value));
+  $$(`.filters[data-for=${name}] [name]`).forEach((el) => (f[el.name] = el.type === "checkbox" ? (el.checked ? "1" : "") : el.value));
   return f;
+}
+
+// The filters and sorts every list shares, added to each tab's own filters. A group shows when
+// one of its tracks passes them all, and sorts by its first track (the suggested keep, version 1).
+const OWN_SORTS = {
+  identical: [["", "group order"], ["space", "most space saved"], ["copies", "most copies"]],
+  versions: [["", "group order"], ["versions", "most versions"]],
+  tracks: [["", "severity"]],
+  albums: [["artist", "artist"], ["album", "album"], ["broken", "most broken tracks"], ["status", "status"], ["folder", "folder"],
+    ["source", "source"], ["year", "year"], ["added", "recently added"]],
+  check: [["", "scan order"], ["match", "lowest match first"]],
+  unanalysed: [["", "reason"]],
+};
+const TRACK_SORTS = [["artist", "artist"], ["album", "album"], ["title", "title"], ["folder", "folder"], ["source", "source"],
+  ["year", "year"], ["added", "recently added"]];
+function sortOptions(name) {
+  const key = name === "broken" ? views.broken.mode : name;
+  return (key === "albums" ? OWN_SORTS.albums : [...OWN_SORTS[key], ...TRACK_SORTS])
+    .map(([v, label]) => `<option value="${v}">Sort by ${esc(label)}</option>`).join("");
 }
 $$(".filters").forEach((box) => {
   const name = box.dataset.for;
+  box.insertAdjacentHTML("beforeend", `<div class="filters-more">
+    <input name="artist" list="dl-${name}-artists" placeholder="Artist"><datalist id="dl-${name}-artists"></datalist>
+    <input name="album" list="dl-${name}-albums" placeholder="Album"><datalist id="dl-${name}-albums"></datalist>
+    <input name="folder" list="dl-${name}-folders" placeholder="Folder"><datalist id="dl-${name}-folders"></datalist>
+    <select name="source"><option value="">Any source</option></select>
+    <span class="years"><input type="number" name="year_from" placeholder="Year from" min="1000" max="2999">
+      <input type="number" name="year_to" placeholder="Year to" min="1000" max="2999"></span>
+    <select name="sort">${sortOptions(name)}</select>
+    <label class="check inline"><input type="checkbox" name="desc"> Reverse</label>
+    <button class="link small" data-clear-filters>Clear filters</button></div>`);
   let timer;
   const reload = () => { views[name].page = 1; loadList(name); };
-  box.addEventListener("input", (e) => {   // typing waits a moment; dropdowns apply at once
+  box.addEventListener("input", (e) => {   // typing waits a moment; dropdowns and ticks apply at once
     clearTimeout(timer);
-    if (e.target.tagName === "SELECT") reload(); else timer = setTimeout(reload, 300);
+    if (e.target.tagName === "SELECT" || e.target.type === "checkbox") reload(); else timer = setTimeout(reload, 300);
+  });
+  box.addEventListener("click", (e) => {
+    if (!e.target.closest("[data-clear-filters]")) return;
+    $$("[name]", box).forEach((el) => { if (el.type === "checkbox") el.checked = false; else if (el.tagName === "SELECT") el.selectedIndex = 0; else el.value = ""; });
+    reload();
   });
 });
+
+// What the shared filters can offer on a tab (its artists, albums, folders, sources), once per scan.
+async function loadFacets(name) {
+  const stamp = STATE.results.created;
+  if (views[name].facets === stamp) return;
+  views[name].facets = stamp;
+  const f = await api(`/api/facets?tab=${name}`);
+  const opts = (vals) => vals.map((v) => `<option value="${esc(v)}">`).join("");
+  $(`#dl-${name}-artists`).innerHTML = opts(f.artists || []);
+  $(`#dl-${name}-albums`).innerHTML = opts(f.albums || []);
+  $(`#dl-${name}-folders`).innerHTML = Object.entries(f.folders || {}).map(([v, n]) => `<option value="${esc(v)}" label="${num(n)} tracks">`).join("");
+  const sel = $(`.filters[data-for=${name}] [name=source]`), chosen = sel.value;
+  sel.innerHTML = `<option value="">Any source</option>` +
+    Object.entries(f.sources || {}).map(([v, n]) => `<option value="${esc(v)}">${esc(v)} (${num(n)})</option>`).join("");
+  sel.value = chosen;
+  if (f.years && f.years.length) $$(`.filters[data-for=${name}] .years input`).forEach((el) => (el.title = `${f.years[0]}–${f.years[1]} on this tab`));
+}
 
 async function loadList(name) {
   const f = filtersOf(name);
@@ -177,6 +228,7 @@ async function loadList(name) {
   const list = $(`#${name}-list`);
   if (!STATE || !STATE.results) { list.innerHTML = `<div class="empty">No scan yet. Run one from the Overview tab.</div>`; return; }
   const byAlbum = name === "broken" && views.broken.mode === "albums";
+  loadFacets(name).catch(() => {});
   const data = await api(`/api/${byAlbum ? "broken-albums" : name}?${qs}`);
   views[name].data = data;
   const word = byAlbum ? "albums" : { identical: "groups", versions: "songs", broken: "files", check: "pairs", unanalysed: "tracks" }[name];
@@ -221,6 +273,7 @@ $("#broken-view").onclick = (e) => {
   views.broken.page = 1;
   $$("#broken-view button").forEach((x) => x.classList.toggle("active", x === b));
   $("#tab-broken").classList.toggle("tracks", b.dataset.view === "tracks");
+  $(".filters[data-for=broken] [name=sort]").innerHTML = sortOptions("broken");
   loadList("broken");
 };
 const fileName = (p) => esc(p.split(/[\\/]/).pop());
@@ -293,7 +346,8 @@ const playButtons = (t) => `<button class="play" data-k="${t.k}" data-at="start"
 const where = (t) => `<div class="path">${esc(t.file)} <button class="reveal" data-k="${t.k}" title="Show in folder">📂</button></div>`;
 const loud = (t) => (t.silent ? "silent" : t.loudness == null ? "" : t.loudness.toFixed(1) + " LU");
 const fmt = (t) => `${esc(t.codec)} ${t.bitrate ? t.bitrate + "k" : ""}`;
-const nameCell = (t) => `<div class="title">${esc(t.title)}</div><div class="sub">${esc(t.artist)} — ${esc(t.album)}</div>${where(t)}`;
+const source = (src) => (src ? `<span class="tag src">${esc(src)}</span>` : "");
+const nameCell = (t) => `<div class="title">${esc(t.title)}</div><div class="sub">${esc(t.artist)} — ${esc(t.album)}${t.year ? ` (${t.year})` : ""} ${source(t.source)}</div>${where(t)}`;
 
 const RENDER = {
   identical: (g) => `<div class="group">
@@ -329,7 +383,7 @@ const RENDER = {
       <td class="num">${t.length}<div>${fmt(t)}</div></td></tr></table></div>`,
 
   albums: (a) => `<div class="group album" data-folder="${esc(a.folder)}" data-k="${a.broken[0].k}">
-    <div class="group-head"><b>${esc(a.album || "(no album)")}</b> <span>${esc(a.artist)}</span>
+    <div class="group-head"><b>${esc(a.album || "(no album)")}</b> <span>${esc(a.artist)}${a.year ? ` (${a.year})` : ""}</span> ${source(a.source)}
       <span class="status ${a.status}" title="${esc(STATUS[a.status][1])}">${esc(STATUS[a.status][0])}</span>
       ${a.checked ? `<span>rechecked ${esc(a.checked)}</span>` : ""}
       <span class="actions">
