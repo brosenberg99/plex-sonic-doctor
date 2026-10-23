@@ -14,6 +14,10 @@ sonic analysis Plex has already done on every track.
 - **Why tracks have no sonic analysis**: Plex analyses a whole album at once, and one file it can't
   decode makes it skip the entire album, every night, without saying which file. The **Not analysed**
   tab names that file.
+- **Tracks with missing or wrong tags** (optional): no artist, no album, a file name or a video title
+  as the title. [AcoustID](https://acoustid.org) identifies each one by its sound, and the **Tags**
+  tab lists them by folder with what they really are, for fixing in
+  [MusicBrainz Picard](https://picard.musicbrainz.org). This tool doesn't change tags itself.
 
 Nothing is ever deleted. Copies you choose to remove are **moved** to a holding folder, and every
 move can be undone.
@@ -78,7 +82,9 @@ small window open while you use it.
    (when the new download was saved next to the broken file). Filter by status to see what's left to do.
 6. **Move & undo** previews the move, then moves the marked copies to the holding folder. Every
    batch can be put back from the same page, all of it or just the files you search for.
-7. **Settings**: change what counts as identical (for example, lengths within 3 s instead of 2), then
+7. **Tags** (optional, see [Fixing tags](#fixing-tags)): press **Identify tracks**, then fix the folders it lists in
+   MusicBrainz Picard.
+8. **Settings**: change what counts as identical (for example, lengths within 3 s instead of 2), then
    **Quick re-sort** to see the effect in about a minute and a half.
 
 **Or from the command line:**
@@ -87,6 +93,7 @@ small window open while you use it.
 sonicdoctor setup      # sign in to Plex and find your files (once)
 sonicdoctor scan       # scan and write the reports
 sonicdoctor gui        # open the app in your web browser
+sonicdoctor tags       # optional: find tracks with missing or wrong tags (needs an AcoustID key)
 ```
 
 **Setup** asks you to sign in with your Plex account by entering a short code at
@@ -113,6 +120,7 @@ setup that path. Without access, the tool asks Plex over the network instead, wh
 | `possibly_broken.csv` | Damaged or wrong files across the whole library, with `folder_flagged` (e.g. "20 of 20 tracks in this folder") so you can tell when a whole album needs replacing. |
 | `check_by_ear.csv` | Pairs whose audio only partly matches (alternate takes, variants). |
 | `not_analysed.csv` | Tracks without Plex's sonic analysis (so they weren't compared), each with a `reason`: a problem file, blocked by a problem file in the same album, result thrown away by Plex (mostly clips under 30 s), or no problem found. |
+| `tag_issues.csv` | Written by `sonicdoctor tags`, not by a scan: tracks whose tags need work, with what AcoustID identified them as and a link to the recording on MusicBrainz. |
 
 The first scan fingerprints the candidate files, which can take about an hour for a large library
 over a network share. Later scans only fingerprint new or changed files. `sonicdoctor scan --quick`
@@ -162,6 +170,39 @@ same position. If the kept copy is already in that list, the moved one is just t
   then press it.
 - **Whose playlists:** the ones of the Plex account the app signed in with. Other Plex Home users'
   playlists aren't changed.
+
+### Fixing tags
+
+Many tracks end up with empty or wrong tags (`[Unknown Artist]`, `[Unknown Album]`, `04 - song_name`,
+"Artist - Song (Official Video)"). This tool finds them and works out what they are; you fix them in
+[MusicBrainz Picard](https://picard.musicbrainz.org), which is built for exactly that.
+
+1. Get a free AcoustID key: sign in at [acoustid.org/new-application](https://acoustid.org/new-application)
+   and register an application (any name). Paste the key in **Settings**, or run
+   `sonicdoctor tags --key YOUR_KEY`.
+2. Press **Identify tracks** on the **Tags** tab, or run `sonicdoctor tags`. By default it looks up the tracks
+   whose tags look wrong; `--all` (or *Every track*) looks up the whole library, which takes hours. Tracks
+   without a fingerprint are fingerprinted first. Each file is looked up once, about 3 a second, and it can
+   be stopped and resumed.
+3. Each track gets a verdict:
+
+   | Verdict | Meaning |
+   |---|---|
+   | Identified, needs tags | AcoustID knows the song; its tags are empty or messy |
+   | Named differently | AcoustID is sure, but its title is different: a mix-up, or just a translated title |
+   | Unsure | The tags look wrong, and AcoustID's matches disagree or aren't strong |
+   | Not in AcoustID | The tags look wrong and nothing matched: try Picard's *Lookup*, which searches by name |
+   | Tags look right | Nothing to do |
+
+   A weak match, or no match, never counts against tags that look fine.
+4. **By folder** lists folders with the most tracks to fix first, and guesses each folder's album from the
+   albums its identified tracks share. **Open in Picard** opens the folder (for a folder of loose tracks,
+   just its tracks to fix). The same list is in `tag_issues.csv`.
+
+**In Picard, turn off *Rename files* and *Move files*** (Options › File Naming). Files then stay where
+they are, so Plex keeps their play counts, ratings and playlist places, and this tool's move history stays
+right. After saving, Plex picks up the new tags at its next library scan. Saving changes the files, so they're
+fingerprinted again at the next identify or scan.
 
 ### Optional: full damage check
 
@@ -220,7 +261,9 @@ folder:
 - Linux: `~/.local/share/plex-sonic-doctor`
 
 Set `SONICDOCTOR_HOME` to use another folder. Nothing is sent anywhere except to your own Plex
-server and, when you sign in, plex.tv.
+server and, when you sign in, plex.tv. The one exception is the optional tag check, and only once you
+add an AcoustID key: for each track it looks up, it sends AcoustID the audio fingerprint (the first two
+minutes, as numbers) and the track's length. No file names, paths or tags are sent.
 
 The browser app only answers this computer. Every request must carry a secret key, made fresh
 each time the app starts and included in the link it opens, so other web pages can't use it.
@@ -234,7 +277,8 @@ MIT; see [LICENSE](LICENSE).
 - Plex's sonic-analysis file format isn't documented. It was worked out by
   [knoopx](https://gist.github.com/knoopx/567b74342ad82eac1b97334caebb1d7a), and a Plex update
   could change it. The distance formula was checked against 4,000 of Plex's own answers.
-- Audio fingerprints use [Chromaprint](https://acoustid.org/chromaprint).
+- Audio fingerprints use [Chromaprint](https://acoustid.org/chromaprint); tracks are identified with
+  [AcoustID](https://acoustid.org) and [MusicBrainz](https://musicbrainz.org) data.
 - The thresholds were tuned on one large (100,000+ track) library. Start with small batches and listen when
   you're unsure.
 

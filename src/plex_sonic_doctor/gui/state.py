@@ -8,9 +8,11 @@ import time
 from typing import Dict, List, Optional
 
 from .. import config, mover
-from ..analysis import NOT_ANALYSED_REASONS, REASON_PROBLEM, SEVERITY_ORDER, fmt_dur
+from ..acoustid import DISAGREE, ISSUES, LOOKS_RIGHT, MISSING, VERDICTS
+from ..analysis import ALBUM_FOLDER_MAX_TRACKS, NOT_ANALYSED_REASONS, REASON_PROBLEM, SEVERITY_ORDER, fmt_dur
 
 DECISIONS = ("remove", "keep")
+PICARD_MAX_FILES = 200       # per Open in Picard: a command line has room for about that many paths
 
 
 class Decisions:
@@ -155,7 +157,20 @@ class State:
             with open(path, encoding="utf-8") as f:
                 self.results = json.load(f)
             top_folders(self.results["tracks"])
+        self.reload_tags()
         self.refresh_moved()
+
+    def reload_tags(self) -> None:
+        """The last tag check (tags.json), its rows tied to the scan's tracks."""
+        self.tags: Optional[dict] = None
+        path = os.path.join(config.sub_dir("reports"), "tags.json")
+        if not self.results or not os.path.exists(path):
+            return
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        k_of = {t["file"]: k for k, t in enumerate(self.results["tracks"])}
+        data["rows"] = [dict(r, k=k_of[r["file"]]) for r in data["rows"] if r["file"] in k_of]
+        self.tags = data
 
     def refresh_moved(self) -> None:
         self.moved = mover.moved_files(config.sub_dir("moves"))
@@ -208,7 +223,8 @@ class State:
               "versions": lambda: [v["k"] for x in self._live_versions() for v in x["versions"]],
               "broken": lambda: [b["k"] for b in self.results["broken"] if self._here(b["k"])],
               "check": lambda: [k for r in self._live_check() for k in (r["a"], r["b"])],
-              "unanalysed": lambda: [r["k"] for r in self._live_not_analysed()]}[tab]()
+              "unanalysed": lambda: [r["k"] for r in self._live_not_analysed()],
+              "tags": lambda: [r["k"] for r in self._live_tags()]}[tab]()
         T = self.results["tracks"]
         count = lambda vals: dict(sorted(_count(vals).items(), key=lambda x: _fold(x[0])))
         years = [T[k]["year"] for k in ks if T[k].get("year")]
@@ -475,6 +491,94 @@ class State:
                       for r in p["items"]]
         return p
 
+    # ---------------------------------------------------------------- tags (AcoustID)
+    # Read-only: tracks whose tags look missing or wrong, and what AcoustID says they are. The
+    # tags are fixed in MusicBrainz Picard, a folder at a time; then the tag check runs again.
+
+    def tag_rows(self, q="", verdict="", problem="", **common) -> List[dict]:
+        if not self.tags:
+            return []
+        T = self.results["tracks"]
+        rows = [r for r in self._live_tags()
+                if (verdict == "issues" and r["verdict"] in ISSUES or verdict in ("", r["verdict"]))
+                and (not problem or problem in r["problems"])
+                and (not q or q in _match_text(T[r["k"]]["title"], T[r["k"]]["artist"], T[r["k"]]["album"],
+                                               T[r["k"]]["file"], r["title"], r["artist"], r["album"]))]
+        order = {v: n for n, v in enumerate(VERDICTS)}
+        rows.sort(key=lambda r: (order[r["verdict"]], _fold(T[r["k"]]["file"])))
+        return self._refine(rows, lambda r: [r["k"]], common, {"score": lambda r: -r["score"]})
+
+    def _tag_item(self, r: dict) -> dict:
+        return dict(self.track(r["k"]), verdict=r["verdict"], problems=r["problems"], score=r["score"],
+                    recording=r["recording"], suggest={"title": r["title"], "artist": r["artist"], "album": r["album"],
+                                                       "album_type": r["album_type"]}, others=r["others"])
+
+    def tags_page(self, page=1, per=100, **filters) -> dict:
+        p = self._page(self.tag_rows(**filters), page, per)
+        p["items"] = [self._tag_item(r) for r in p["items"]]
+        p["verdict_counts"] = self.tag_counts()
+        return p
+
+    def tag_folders(self, sort="issues", desc="", **filters) -> List[dict]:
+        """Album folders with tracks whose tags need work, the worst first. Each folder's album is
+        guessed from the albums its identified tracks have in common."""
+        if not self.tags:
+            return []
+        filters["verdict"] = filters.get("verdict") or "issues"     # a folder whose tags are fine has nothing to do
+        T, folder_tracks = self.results["tracks"], self._folder_tracks()
+        by_folder: Dict[str, List[dict]] = {}
+        for r in self.tag_rows(**filters):
+            by_folder.setdefault(os.path.dirname(T[r["k"]]["file"]), []).append(r)
+        out = []
+        for folder, rows in by_folder.items():
+            here = [k for k in folder_tracks.get(folder, []) if self._here(k)]
+            out.append({"folder": folder, "rows": rows, "tracks": len(here), "guess": folder_album(rows),
+                        "loose": len(here) > ALBUM_FOLDER_MAX_TRACKS})
+        text = lambda s: (s or "").casefold()
+        keys = {"issues": lambda a: (-len(a["rows"]), text(a["folder"])),
+                "folder": lambda a: text(a["folder"]),
+                "artist": lambda a: (text(T[a["rows"][0]["k"]]["artist"]), text(a["folder"])),
+                "album": lambda a: (text(T[a["rows"][0]["k"]]["album"]), text(a["folder"]))}
+        out.sort(key=keys.get(sort, keys["issues"]), reverse=bool(desc))
+        return out
+
+    def tag_folders_page(self, page=1, per=30, **filters) -> dict:
+        p = self._page(self.tag_folders(**filters), page, per)
+        p["items"] = [{"folder": a["folder"], "tracks": a["tracks"], "guess": a["guess"], "loose": a["loose"],
+                       "counts": _count(r["verdict"] for r in a["rows"]), "k": a["rows"][0]["k"],
+                       "rows": [self._tag_item(r) for r in a["rows"][:200]], "more": max(0, len(a["rows"]) - 200)}
+                      for a in p["items"]]
+        p["verdict_counts"] = self.tag_counts()
+        return p
+
+    def tag_counts(self) -> Dict[str, int]:
+        rows = self._live_tags() if self.tags else []
+        return {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS}
+
+    def tag_summary(self) -> Optional[dict]:
+        if not self.tags:
+            return None
+        counts = self.tag_counts()
+        return {"created": self.tags["created"], "verdicts": counts, "issues": sum(counts[v] for v in ISSUES),
+                "suspect_tracks": self.tags["stats"]["suspect_tracks"],
+                "suspect_looked_up": self.tags["stats"]["suspect_looked_up"]}
+
+    def picard_files(self, folder: str = "", k: Optional[int] = None) -> List[str]:
+        """What to open in Picard: one track's file, or a folder. A folder of loose tracks (the
+        music folder itself, often tens of thousands of files) opens as just its tracks to fix."""
+        if not self.results:
+            raise KeyError(folder)
+        if k is not None:
+            return [self.results["tracks"][int(k)]["file"]]
+        ks = self._folder_tracks().get(folder)
+        if ks is None:
+            raise KeyError(folder)
+        if len(ks) <= ALBUM_FOLDER_MAX_TRACKS:
+            return [folder]
+        T = self.results["tracks"]
+        return [T[r["k"]]["file"] for r in self.tag_rows(verdict="issues")
+                if os.path.dirname(T[r["k"]]["file"]) == folder][:PICARD_MAX_FILES]
+
     # ---------------------------------------------------------------- what's still in the library
     # The lists and counts leave out what's in the holding folder, so they change with every move
     # and undo instead of waiting for the next scan. A group or song down to one copy is done.
@@ -502,6 +606,9 @@ class State:
         rows = [r if isinstance(r, dict) else {"k": r, "reason": "", "details": "run a full scan to see why"}
                 for r in rows]
         return [r for r in rows if self._here(r["k"])]
+
+    def _live_tags(self) -> List[dict]:
+        return [r for r in self.tags["rows"] if self._here(r["k"])]
 
     def live_stats(self) -> Optional[dict]:
         """The last scan's numbers, recounted without the files in the holding folder."""
@@ -620,6 +727,26 @@ class State:
 
     def plan(self) -> mover.Plan:
         return mover.plan_moves(self.move_rows(), self.cfg.holding_dir)
+
+
+def folder_album(rows: List[dict]) -> Optional[dict]:
+    """The album most of a folder's identified tracks appear on, if at least half do: a song is
+    on many releases (singles, compilations), but an album's tracks share the album."""
+    named = [r for r in rows if r["albums"] and r["verdict"] in (MISSING, DISAGREE, LOOKS_RIGHT)]
+    if not named:
+        return None
+    seen: Dict[str, int] = {}
+    title_of: Dict[str, str] = {}
+    for r in named:
+        for rg, title in {a[0]: a[1] for a in r["albums"]}.items():
+            seen[rg] = seen.get(rg, 0) + 1
+            title_of[rg] = title
+    rg, n = max(seen.items(), key=lambda x: x[1])
+    if n * 2 < len(named):
+        return None
+    artists = _count(r["artist"] for r in named if any(a[0] == rg for a in r["albums"]))
+    return {"album": title_of[rg], "artist": max(artists, key=artists.get), "release_group": rg,
+            "tracks": n, "of": len(named)}
 
 
 def _count(values) -> Dict[str, int]:

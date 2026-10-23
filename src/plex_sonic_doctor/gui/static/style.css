@@ -140,3 +140,9 @@ button.small { padding: 3px 10px; font-size: 13px; }
 .filters-more .years input { width: 105px; }
 label.check.inline { display: inline-flex; align-items: center; margin: 0; font-size: 14px; }
 .tag.src { font-size: 11px; color: var(--muted); }
+.verdict { border-radius: 10px; padding: 1px 9px; font-size: 12px; font-weight: 600; background: var(--chip); color: var(--text); white-space: nowrap; }
+.verdict.miss { background: var(--keep-bg); color: var(--keep-text); }
+.verdict.disagree { background: var(--remove-bg); color: var(--remove-text); }
+.verdict.unsure { background: var(--warn-bg); }
+.verdict.notfound, .verdict.ok { color: var(--muted); }
+#tab-tags details ul { margin: 6px 0; padding-left: 20px; }

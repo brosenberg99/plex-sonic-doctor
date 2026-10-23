@@ -147,6 +147,9 @@ def open_cache(path: str) -> sqlite3.Connection:
         file TEXT PRIMARY KEY, size INTEGER, mtime REAL, problem TEXT, details TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS source (
         file TEXT PRIMARY KEY, size INTEGER, mtime REAL, source TEXT)""")
+    # AcoustID's answer for a file, keyed by the size and date of the fingerprint it was asked with
+    conn.execute("""CREATE TABLE IF NOT EXISTS acoustid (
+        file TEXT PRIMARY KEY, size INTEGER, mtime REAL, looked_up TEXT, matches TEXT, error TEXT)""")
     return conn
 
 

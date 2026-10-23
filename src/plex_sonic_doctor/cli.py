@@ -4,7 +4,7 @@ import os
 import sys
 import time
 
-from . import __version__, config, fingerprint, mover, plex, plexlists, scan, setup_wizard
+from . import __version__, acoustid, config, fingerprint, mover, plex, plexlists, scan, setup_wizard
 from .pathmap import PathMapper
 
 
@@ -39,6 +39,8 @@ def cmd_check(args, cfg):
     print("Path maps: " + (", ".join(f"{m.plex} -> {m.local}" for m in cfg.path_maps) or "none"))
     print("Fingerprints: " + setup_wizard.tools_status(cfg))
     print(f"Rules: {cfg.rules}")
+    print("AcoustID: " + ("key set (tags can be checked)" if cfg.acoustid_key else "no key (tags aren't checked)"))
+    print("MusicBrainz Picard: " + (" ".join(acoustid.picard_command(cfg.picard) or []) or "not found. " + acoustid.picard_help()))
 
 
 def cmd_scan(args, cfg):
@@ -53,6 +55,26 @@ def cmd_damage(args, cfg):
     _need_setup(cfg)
     n = scan.run_damage_check(cfg, args.folder or "", _progress)
     print(f"Checked {n:,} files. Run  sonicdoctor scan --quick  to add the results to the broken-files report.")
+
+
+def cmd_tags(args, cfg):
+    if args.key is not None:
+        cfg.acoustid_key = args.key.strip()
+        config.save(cfg)
+        print("AcoustID key saved." if cfg.acoustid_key else "AcoustID key removed: tracks won't be looked up.")
+        if not cfg.acoustid_key:
+            return
+    if not cfg.acoustid_key:
+        sys.exit(f"Looking tracks up needs a free AcoustID key: get one at {acoustid.SIGN_UP_URL}, then run\n"
+                 "  sonicdoctor tags --key YOUR_KEY")
+    print("Sends each looked-up file's audio fingerprint and length to AcoustID (no names, paths or tags).")
+    try:
+        stats = scan.run_tag_check(cfg, args.all, _progress)
+    except acoustid.BadKey as e:
+        sys.exit(str(e))
+    print("\n" + acoustid.summary_text(stats))
+    print(f"\nTracks to fix are in {os.path.join(config.sub_dir('reports'), 'tag_issues.csv')}; "
+          "fix them in MusicBrainz Picard.")
 
 
 def cmd_move(args, cfg):
@@ -162,7 +184,10 @@ def main(argv=None):
     s.add_argument("--quick", action="store_true", help="reuse the last track list (e.g. after changing rules)")
     d = sub.add_parser("damage-check", help="decode every file looking for corruption (slow; can be stopped and resumed)")
     d.add_argument("--folder", help="only files whose path contains this text")
-    m = sub.add_parser("move", help="move the copies marked 'remove' in a report into the holding folder")
+    tg = sub.add_parser("tags", help="find tracks with missing or wrong tags, using AcoustID (sends fingerprints only)")
+    tg.add_argument("--all", action="store_true", help="every track, not just those whose tags look wrong (slow)")
+    tg.add_argument("--key", help="save your AcoustID key first (an empty value removes it)")
+    m =sub.add_parser("move", help="move the copies marked 'remove' in a report into the holding folder")
     m.add_argument("decisions", help="a report CSV with the decision column filled in")
     m.add_argument("--go", action="store_true", help="actually move (default is a dry run)")
     m.add_argument("--update-playlists", action="store_true",
@@ -181,7 +206,7 @@ def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     cfg = config.load()
-    {"setup": cmd_setup, "check": cmd_check, "scan": cmd_scan, "damage-check": cmd_damage, "move": cmd_move,
+    {"setup": cmd_setup, "check": cmd_check, "scan": cmd_scan, "damage-check": cmd_damage, "tags": cmd_tags, "move": cmd_move,
      "batches": cmd_batches, "undo": cmd_undo, "rescan": cmd_rescan, "gui": cmd_gui}[args.cmd](args, cfg)
 
 

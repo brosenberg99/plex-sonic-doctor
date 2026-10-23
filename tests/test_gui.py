@@ -48,6 +48,13 @@ class GuiTests(unittest.TestCase):
         cfg.holding_dir = os.path.join(cls.base, "holding")
         config.save(cfg)
         reports.write(res, streams, config.sub_dir("reports"))
+        # AcoustID's made-up answers: Song One is what its tags say; "Not A Song" is something else.
+        from plex_sonic_doctor import acoustid
+        rec = lambda title, artist, album: {"score": 0.95, "id": "rec-" + title, "title": title, "artists": [artist],
+                                            "albums": [{"id": "rg-" + album, "title": album, "type": "Album", "secondary": []}]}
+        acoustid.write_report(tracks, {tracks[0]["file"]: [rec("Song One", "X", "A")],
+                                       tracks[4]["file"]: [rec("Real Song", "Z", "Real Album")],
+                                       tracks[5]["file"]: []}, config.sub_dir("reports"))
         cls.tracks = tracks
 
         from plex_sonic_doctor.gui.server import App, _Server, make_handler
@@ -251,6 +258,45 @@ class GuiTests(unittest.TestCase):
         r = json.loads(self.request("POST", "/api/bulk", {"tab": "identical", "action": "suggested",
                                                           "filters": {"folder": "nowhere"}})[1])
         self.assertEqual(r["changed"], 0)
+
+    def test_tags_tab(self):
+        get = lambda path: json.loads(self.request("GET", path)[1])
+        state = get("/api/state")
+        self.assertEqual((state["tags"]["issues"], state["acoustid"]), (1, False))
+        tracks = get("/api/tags")
+        self.assertEqual(tracks["total"], 3)
+        self.assertEqual(tracks["verdict_counts"]["Tags look right"], 2)
+        issues = get("/api/tags?verdict=issues")["items"]
+        self.assertEqual([(t["title"], t["verdict"], t["suggest"]["title"], t["suggest"]["album"]) for t in issues],
+                         [("Not A Song", "Named differently", "Real Song", "Real Album")])
+        self.assertEqual(get("/api/tags?q=real+song")["total"], 1)                 # identified names are searchable
+        self.assertEqual(get("/api/tags?verdict=issues&folder=a")["total"], 0)     # shared filters
+        folders = get("/api/tag-folders")["items"]                                 # folders with work to do
+        self.assertEqual([(os.path.basename(f["folder"]), f["tracks"], f["counts"], f["guess"]["album"]) for f in folders],
+                         [("D", 2, {"Named differently": 1}, "Real Album")])
+        self.assertEqual(get("/api/facets?tab=tags")["artists"], ["X", "Y"])
+
+        # Picard: only for folders of the library, and a clear message when it isn't installed
+        self.assertEqual(self.request("POST", "/api/picard", {"folder": self.base})[0], 404)
+        s, folder = self.app.state, folders[0]["folder"]
+        self.assertEqual(s.picard_files(folder), [folder])
+        self.assertEqual(s.picard_files(k=5), [self.tracks[5]["file"]])
+        from unittest import mock
+        with mock.patch("plex_sonic_doctor.gui.state.ALBUM_FOLDER_MAX_TRACKS", 1):     # a folder of loose tracks
+            self.assertEqual(s.picard_files(folder), [self.tracks[4]["file"]])         # just its tracks to fix
+        cfg = self.app.state.cfg
+        old, cfg.picard = cfg.picard, os.path.join(self.base, "no-picard-here")
+        try:
+            r = json.loads(self.request("POST", "/api/picard", {"folder": folders[0]["folder"]})[1])
+            self.assertFalse(r["ok"])
+            self.assertIn("Picard wasn't found", r["message"])
+        finally:
+            cfg.picard = old
+
+        # identifying needs a key first
+        self.request("POST", "/api/identify", {})
+        job = self.wait_for_job()
+        self.assertIn("AcoustID key", job["error"])
 
     def test_top_folders(self):
         from plex_sonic_doctor.gui.state import LOOSE, top_folders

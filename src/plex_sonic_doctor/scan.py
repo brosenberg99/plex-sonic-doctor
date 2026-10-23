@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from . import analysis, config, filecheck, fingerprint, mover, plex, plexdata, reports, sources
+from . import acoustid, analysis, config, filecheck, fingerprint, mover, plex, plexdata, reports, sources
 from .pathmap import PathMapper
 
 CANDIDATE_MAX_DISTANCE = 0.06   # Plex sonic distance at which a pair is worth fingerprinting
@@ -167,6 +167,44 @@ def run_damage_check(cfg: config.Config, folder_filter: str = "", progress=lambd
         return fingerprint.run_damage_check(conn, cfg.ffmpeg, tracks, max(1, cfg.workers // 2), progress, should_stop)
     finally:
         conn.close()
+
+
+def run_tag_check(cfg: config.Config, everything: bool = False, progress=lambda m, f=-1: None,
+                  should_stop=lambda: False) -> dict:
+    """Look tracks up in AcoustID and write the tag report. By default only the tracks whose tags
+    look wrong (no artist, no album, a file name for a title...); with everything, every track.
+    Files without a fingerprint yet are fingerprinted first. Can be stopped and resumed."""
+    if not cfg.acoustid_key:
+        raise RuntimeError(f"Looking tracks up needs an AcoustID key (free: {acoustid.SIGN_UP_URL}). "
+                           "Add it in Settings, or run  sonicdoctor tags --key YOUR_KEY")
+    tracks_path = os.path.join(config.sub_dir("cache"), "tracks.json")
+    if not os.path.exists(tracks_path):
+        raise RuntimeError("Run a scan first, so the track list is known.")
+    with open(tracks_path, encoding="utf-8") as f:
+        tracks = json.load(f)
+    held = mover.moved_files(config.sub_dir("moves"))
+    tracks = [t for t in tracks if t["file"] not in held]
+    chosen = tracks if everything else [t for t in tracks if acoustid.tag_problems(t)]
+    progress(f"{len(chosen):,} tracks to identify" + ("" if everything else " (the ones whose tags look wrong)"), -1)
+    backend, why = fingerprint.detect(cfg.ffmpeg, cfg.fpcalc)
+    conn = fingerprint.open_cache(os.path.join(config.sub_dir("cache"), "fingerprints.sqlite3"))
+    try:
+        if backend:
+            fingerprint.ensure_fingerprints(conn, backend, chosen, cfg.workers, progress, should_stop)
+        else:
+            progress(f"Can't fingerprint new files ({why}); looking up the ones already fingerprinted", -1)
+        looked_up = 0
+        if not should_stop():
+            looked_up = acoustid.ensure_lookups(conn, cfg.acoustid_key, chosen, progress, should_stop)
+        lookups = acoustid.load_lookups(conn)
+    finally:
+        conn.close()
+    # whatever was found so far goes in the report, even when stopped
+    data = acoustid.write_report(tracks, lookups, config.sub_dir("reports"))
+    if should_stop():
+        raise Stopped()
+    progress("Done", 1)
+    return dict(data["stats"], new_lookups=looked_up)
 
 
 def measure_scale(cfg: config.Config, seeds: int = 20, progress=lambda m, f=-1: None) -> Optional[float]:

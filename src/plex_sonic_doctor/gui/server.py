@@ -16,7 +16,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .. import __version__, config, fingerprint, mover, plex, plexdata, plexlists, scan, setup_wizard
+from .. import __version__, acoustid, config, fingerprint, mover, plex, plexdata, plexlists, scan, setup_wizard
 from ..config import PathMap
 from ..pathmap import PathMapper, share_found, suggest_map
 from .state import COMMON_FILTERS, State
@@ -100,6 +100,7 @@ class App:
                     "sonic_dir": cfg.sonic_dir, "path_maps": [m.__dict__ for m in cfg.path_maps],
                     "tools": why if backend else f"{why}. {fingerprint.install_help()}", "tools_ok": bool(backend),
                     "results": {"created": r["created"], "stats": s.live_stats()} if r else None,
+                    "tags": s.tag_summary(), "acoustid": bool(cfg.acoustid_key),
                     "marked": s.marked_summary(), "moved": len(s.moved), "job": self.jobs.snapshot(),
                     "data_dir": config.data_dir(), "reports_dir": config.sub_dir("reports")}
         if route == ("GET", "/api/job"):
@@ -134,6 +135,18 @@ class App:
             return s.check_page(page(), **filt("q"))
         if route == ("GET", "/api/unanalysed"):
             return s.not_analysed_page(page(), **filt("q", "reason"))
+        if route == ("GET", "/api/tags"):
+            return s.tags_page(page(), **filt("q", "verdict", "problem"))
+        if route == ("GET", "/api/tag-folders"):
+            return s.tag_folders_page(page(), **filt("q", "verdict", "problem"))
+        if route == ("POST", "/api/picard"):
+            files = s.picard_files(body.get("folder", ""), body.get("k"))
+            cmd = acoustid.picard_command(cfg.picard)
+            if not cmd:
+                return {"ok": False, "message": "MusicBrainz Picard wasn't found. " + acoustid.picard_help() +
+                                                " Or set where it is in Settings."}
+            subprocess.Popen(cmd + files, creationflags=_NO_WINDOW)
+            return {"ok": True, "files": len(files)}
         if route == ("POST", "/api/decide"):
             s.decisions.set_many(body["files"], body.get("decision", ""))
             return {"ok": True, "marked": s.marked_summary()}
@@ -164,6 +177,15 @@ class App:
             def job(progress, should_stop):
                 return {"checked": scan.run_damage_check(config.load(), folder, progress, should_stop)}
             self.jobs.start("Damage check", job)
+            return {"ok": True}
+        if route == ("POST", "/api/identify"):
+            everything = bool(body.get("everything"))
+            def job(progress, should_stop):
+                try:
+                    return scan.run_tag_check(config.load(), everything, progress, should_stop)
+                finally:
+                    s.reload_tags()          # what was found so far shows even when stopped
+            self.jobs.start("Identifying tracks", job)
             return {"ok": True}
         if route == ("POST", "/api/stop"):
             self.jobs.stop_flag = True
@@ -249,14 +271,22 @@ class App:
             return {"rules": cfg.rules.__dict__, "holding_dir": cfg.holding_dir, "workers": cfg.workers,
                     "update_playlists": cfg.update_playlists,
                     "ffmpeg": cfg.ffmpeg, "fpcalc": cfg.fpcalc, "plex_scale": cfg.plex_scale,
-                    "scale_measured": cfg.scale_measured, "default_holding": self.default_holding()}
+                    "scale_measured": cfg.scale_measured, "default_holding": self.default_holding(),
+                    "acoustid_key_set": bool(cfg.acoustid_key), "picard": cfg.picard,
+                    "picard_found": " ".join(acoustid.picard_command(cfg.picard) or []),
+                    "picard_help": acoustid.picard_help()}
         if route == ("POST", "/api/settings"):
             for k, v in body.get("rules", {}).items():
                 if hasattr(cfg.rules, k):
                     setattr(cfg.rules, k, type(getattr(cfg.rules, k))(v))
-            for k in ("holding_dir", "ffmpeg", "fpcalc"):
+            for k in ("holding_dir", "ffmpeg", "fpcalc", "picard"):
                 if k in body:
                     setattr(cfg, k, str(body[k]).strip())
+            # the key is never sent back to the page: an empty box leaves it as it is
+            if str(body.get("acoustid_key") or "").strip():
+                cfg.acoustid_key = str(body["acoustid_key"]).strip()
+            if body.get("acoustid_key_remove"):
+                cfg.acoustid_key = ""
             if "workers" in body:
                 cfg.workers = max(1, min(32, int(body["workers"])))
             if "update_playlists" in body:
@@ -407,6 +437,8 @@ def friendly_error(e: Exception, cfg=None) -> str:
     if name in ("ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout", "NewConnectionError", "MaxRetryError"):
         return (f"Can't reach the Plex server at {url}. Check it's running and the address is right "
                 f"(Setup, step 1).")
+    if isinstance(e, acoustid.BadKey):
+        return str(e)
     if name == "Unauthorized":
         return "Plex didn't accept the sign-in. Sign in again in Setup, step 1."
     if name == "FileNotFoundError":

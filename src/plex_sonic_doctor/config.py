@@ -69,6 +69,8 @@ class Config:
     plex_scale: float = 1.08     # Plex distance = scale x unit-vector distance; re-measured at setup
     scale_measured: bool = False
     workers: int = 8
+    acoustid_key: str = ""       # set = allowed to look tracks up in AcoustID (sends fingerprints, nothing else)
+    picard: str = ""             # MusicBrainz Picard's program; "" = find it
     rules: Rules = field(default_factory=Rules)
 
     @property
@@ -99,11 +101,12 @@ def save(cfg: Config) -> None:
         json.dump(dataclasses.asdict(cfg), f, indent=2)
     os.replace(tmp, path)
     if sys.platform != "win32":
-        os.chmod(path, 0o600)   # it holds the Plex token
+        os.chmod(path, 0o600)   # it holds the Plex token and the AcoustID key
 
 
 def redacted(cfg: Config) -> dict:
     """Settings safe to show or log (no token)."""
     d = dataclasses.asdict(cfg)
     d["plex_token"] = "(set)" if cfg.plex_token else ""
+    d["acoustid_key"] = "(set)" if cfg.acoustid_key else ""
     return d

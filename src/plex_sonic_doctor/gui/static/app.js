@@ -34,7 +34,7 @@ const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toas
 // ------------------------------------------------------------------ tabs and state
 
 let STATE = null;
-const views = { identical: { page: 1 }, versions: { page: 1 }, broken: { page: 1, mode: "albums" }, check: { page: 1 }, unanalysed: { page: 1 } };
+const views = { identical: { page: 1 }, versions: { page: 1 }, broken: { page: 1, mode: "albums" }, check: { page: 1 }, unanalysed: { page: 1 }, tags: { page: 1, mode: "folders" } };
 let current = "overview";
 
 function showTab(name) {
@@ -67,6 +67,10 @@ async function refreshState() {
   $("#n-broken").textContent = s ? num(s.broken_files) : "";
   $("#n-check").textContent = s ? num(s.check_pairs ?? (s.verdicts["check by ear"] || 0)) : "";
   $("#n-unanalysed").textContent = s ? num(s.not_analysed) : "";
+  const tg = STATE.tags;
+  $("#n-tags").textContent = tg ? num(tg.issues) : "";
+  $("#acoustid-off").classList.toggle("hidden", STATE.acoustid);
+  $("#tags-when").textContent = tg ? `Last identified ${tg.created}: ${num(tg.suspect_looked_up)} of the ${num(tg.suspect_tracks)} tracks whose tags look wrong` : "";
   renderCards(s);
   renderMarked(STATE.marked);
   renderJob(STATE.job);
@@ -84,7 +88,9 @@ function renderCards(s) {
     <div class="card" data-goto="broken"><div class="big">${num(s.broken_files)}</div>
       <div>possibly broken files</div><div class="sub">${num(sev["Broken"])} broken, ${num(sev["Likely broken"])} likely, ${num(sev["Check"])} to check${s.broken_fixed ? ` · ${num(s.broken_fixed)} fixed since the scan` : ""}</div></div>
     <div class="card" data-goto="unanalysed"><div class="big">${num(s.tracks)}</div><div>tracks</div>
-      <div class="sub">${num(s.not_analysed)} without Plex's sonic analysis (see why) · last scan ${esc(STATE.results.created)}</div></div>`;
+      <div class="sub">${num(s.not_analysed)} without Plex's sonic analysis (see why) · last scan ${esc(STATE.results.created)}</div></div>` +
+    (STATE.tags ? `<div class="card" data-goto="tags"><div class="big">${num(STATE.tags.issues)}</div><div>tracks whose tags need work</div>
+      <div class="sub">${num(STATE.tags.verdicts["Identified, needs tags"])} identified by AcoustID · ${num(STATE.tags.verdicts["Named differently"])} named differently</div></div>` : "");
 }
 
 function renderMarked(m) {
@@ -101,6 +107,7 @@ function renderJob(j) {
   $("#job-chip").classList.toggle("hidden", !running);
   $("#btn-stop").classList.toggle("hidden", !running);
   ["#btn-scan", "#btn-quick", "#btn-damage", "#btn-plan"].forEach((s) => ($(s).disabled = running));
+  $("#btn-identify").disabled = running || !(STATE && STATE.acoustid && STATE.results);
   if (!j || !j.kind) return;
   $("#job-panel").classList.remove("hidden");
   $("#job-kind").textContent = j.kind + (running ? "" : j.error ? ": stopped" : ": finished");
@@ -138,6 +145,11 @@ function jobSummary(j) {
   if (r.restored != null) parts.push(`Put back ${num(r.restored)} ${r.restored === 1 ? "file" : "files"}`);
   if (r.rechecked != null) parts.push(`Rechecked ${num(r.rechecked)} ${r.rechecked === 1 ? "album" : "albums"}` +
     (Object.keys(r.statuses || {}).length ? ": " + Object.entries(r.statuses).map(([st, n]) => `${num(n)} ${STATUS[st][0].toLowerCase()}`).join(", ") : ""));
+  if (r.new_lookups != null) {
+    const v = r.verdicts || {};
+    parts.push(`Looked up ${num(r.new_lookups)} ${r.new_lookups === 1 ? "track" : "tracks"} in AcoustID; ` +
+      `${num(v["Identified, needs tags"])} identified, ${num(v["Named differently"])} named differently, ${num(v["Unsure"])} unsure, ${num(v["Not in AcoustID"])} not found`);
+  }
   if (pl.updated) parts.push(`updated ${num(pl.updated)} playlist ${pl.updated === 1 ? "entry" : "entries"}`);
   if (pl.restored) parts.push(`restored ${num(pl.restored)} playlist ${pl.restored === 1 ? "entry" : "entries"}`);
   const problems = [...(r.failed || []), ...(pl.failed || []), ...(pl.pending || [])];
@@ -150,6 +162,7 @@ async function startJob(path, body) { await api(path, body || {}); await pollJob
 
 $("#btn-scan").onclick = guard(() => startJob("/api/scan", { quick: false }));
 $("#btn-quick").onclick = guard(() => startJob("/api/scan", { quick: true }));
+$("#btn-identify").onclick = guard(() => startJob("/api/identify", { everything: $("#identify-scope").value === "all" }));
 $("#btn-damage").onclick = guard(() => startJob("/api/damage", { folder: $("#damage-folder").value }));
 $("#btn-stop").onclick = guard(() => api("/api/stop", {}));
 $("#btn-open-reports").onclick = guard(() => api("/api/open-reports", {}));
@@ -172,12 +185,14 @@ const OWN_SORTS = {
     ["source", "source"], ["year", "year"], ["added", "recently added"]],
   check: [["", "scan order"], ["match", "lowest match first"]],
   unanalysed: [["", "reason"]],
+  tags: [["", "verdict"], ["score", "best match first"]],
+  tagFolders: [["issues", "most tracks to fix"], ["folder", "folder"], ["artist", "artist"], ["album", "album"]],
 };
 const TRACK_SORTS = [["artist", "artist"], ["album", "album"], ["title", "title"], ["folder", "folder"], ["source", "source"],
   ["year", "year"], ["added", "recently added"]];
 function sortOptions(name) {
-  const key = name === "broken" ? views.broken.mode : name;
-  return (key === "albums" ? OWN_SORTS.albums : [...OWN_SORTS[key], ...TRACK_SORTS])
+  const key = name === "broken" ? views.broken.mode : name === "tags" && views.tags.mode === "folders" ? "tagFolders" : name;
+  return (key === "albums" || key === "tagFolders" ? OWN_SORTS[key] : [...OWN_SORTS[key], ...TRACK_SORTS])
     .map(([v, label]) => `<option value="${v}">Sort by ${esc(label)}</option>`).join("");
 }
 $$(".filters").forEach((box) => {
@@ -228,14 +243,20 @@ async function loadList(name) {
   const list = $(`#${name}-list`);
   if (!STATE || !STATE.results) { list.innerHTML = `<div class="empty">No scan yet. Run one from the Overview tab.</div>`; return; }
   const byAlbum = name === "broken" && views.broken.mode === "albums";
+  const byFolder = name === "tags" && views.tags.mode === "folders";
+  if (name === "tags" && !STATE.tags) {
+    list.innerHTML = `<div class="empty">No tracks identified yet. Press <b>Identify tracks</b> above.</div>`;
+    $("#tags-total").textContent = ""; $("#tag-verdicts").innerHTML = ""; renderPager(name, { pages: 1 }); return;
+  }
   loadFacets(name).catch(() => {});
-  const data = await api(`/api/${byAlbum ? "broken-albums" : name}?${qs}`);
+  const data = await api(`/api/${byAlbum ? "broken-albums" : byFolder ? "tag-folders" : name}?${qs}`);
   views[name].data = data;
-  const word = byAlbum ? "albums" : { identical: "groups", versions: "songs", broken: "files", check: "pairs", unanalysed: "tracks" }[name];
+  const word = byAlbum ? "albums" : byFolder ? "folders" : { identical: "groups", versions: "songs", broken: "files", check: "pairs", unanalysed: "tracks", tags: "tracks" }[name];
   $(`#${name}-total`).textContent = `${num(data.total)} ${word}` + (data.pages > 1 ? ` · page ${data.page} of ${data.pages}` : "");
-  list.innerHTML = data.items.length ? data.items.map(byAlbum ? RENDER.albums : RENDER[name]).join("") : `<div class="empty">Nothing matches these filters.</div>`;
+  list.innerHTML = data.items.length ? data.items.map(byAlbum ? RENDER.albums : byFolder ? RENDER.tagFolders : RENDER[name]).join("") : `<div class="empty">Nothing matches these filters.</div>`;
   renderPager(name, data);
   if (name === "unanalysed") renderReasons();
+  if (name === "tags") renderVerdicts(data.verdict_counts);
   if (byAlbum) renderAlbumStatuses(data.status_counts);
 }
 
@@ -322,6 +343,48 @@ $("#unanalysed-reasons").onclick = (e) => {
   loadList("unanalysed");
 };
 
+// ------------------------------------------------------------------ tags
+
+const VERDICT = {
+  "Identified, needs tags": ["miss", "AcoustID knows the song; its tags are empty or messy"],
+  "Named differently": ["disagree", "AcoustID is sure, but its title is different: a mix-up, or a translated title"],
+  "Unsure": ["unsure", "tags look wrong; AcoustID isn't sure"],
+  "Not in AcoustID": ["notfound", "tags look wrong; nothing matched (try Picard's Lookup)"],
+  "Tags look right": ["ok", "nothing to do"],
+};
+function renderVerdicts(counts) {
+  const chosen = $(`.filters[data-for=tags] [name=verdict]`).value;
+  $("#tag-verdicts").innerHTML = Object.keys(VERDICT).filter((v) => counts && counts[v]).map((v) =>
+    `<button data-verdict="${esc(v)}" class="${chosen === v ? "active" : ""}"><b>${num(counts[v])}</b>${esc(v)}<span>${esc(VERDICT[v][1])}</span></button>`).join("");
+}
+$("#tag-verdicts").onclick = (e) => {
+  const b = e.target.closest("[data-verdict]");
+  if (!b) return;
+  const sel = $(`.filters[data-for=tags] [name=verdict]`);
+  sel.value = sel.value === b.dataset.verdict ? "" : b.dataset.verdict;
+  views.tags.page = 1;
+  loadList("tags");
+};
+$("#tags-view").onclick = (e) => {
+  const b = e.target.closest("[data-view]");
+  if (!b || b.dataset.view === views.tags.mode) return;
+  views.tags.mode = b.dataset.view;
+  views.tags.page = 1;
+  $$("#tags-view button").forEach((x) => x.classList.toggle("active", x === b));
+  $(".filters[data-for=tags] [name=sort]").innerHTML = sortOptions("tags");
+  loadList("tags");
+};
+$("#tags-list").addEventListener("click", guard(async (e) => {
+  const box = e.target.closest("[data-folder]");
+  if (!box) return;
+  if (e.target.closest("[data-open-folder]")) return api("/api/reveal", { k: +box.dataset.k, folder: true });
+  const pk = e.target.closest("[data-picard]");
+  if (pk) {
+    const r = await api("/api/picard", pk.dataset.picard === "track" ? { k: +box.dataset.k } : { folder: box.dataset.folder });
+    toast(!r.ok ? r.message : `Opening ${r.files === 1 && pk.dataset.picard !== "track" ? "the folder" : `${num(r.files)} ${r.files === 1 ? "file" : "files"}`} in MusicBrainz Picard…`, !r.ok);
+  }
+}));
+
 function renderPager(name, d) {
   const el = $(`.pager[data-for=${name}]`);
   if (d.pages <= 1) { el.innerHTML = ""; return; }
@@ -348,6 +411,14 @@ const loud = (t) => (t.silent ? "silent" : t.loudness == null ? "" : t.loudness.
 const fmt = (t) => `${esc(t.codec)} ${t.bitrate ? t.bitrate + "k" : ""}`;
 const source = (src) => (src ? `<span class="tag src">${esc(src)}</span>` : "");
 const nameCell = (t) => `<div class="title">${esc(t.title)}</div><div class="sub">${esc(t.artist)} — ${esc(t.album)}${t.year ? ` (${t.year})` : ""} ${source(t.source)}</div>${where(t)}`;
+
+// what AcoustID says a track is, next to its tags; links to the recording on MusicBrainz
+const identified = (t) => !t.suggest.title ? `<span class="sub">${t.verdict === "Tags look right" ? "" : "No match"}</span>` :
+  `<div><a href="https://musicbrainz.org/recording/${esc(t.recording)}" target="_blank" rel="noopener"><b>${esc(t.suggest.title)}</b></a></div>
+   <div class="sub">${esc(t.suggest.artist)}${t.suggest.album ? ` — ${esc(t.suggest.album)}${t.suggest.album_type ? ` (${esc(t.suggest.album_type.toLowerCase())})` : ""}` : ""}
+     · match ${pct(t.score)}</div>
+   ${t.others.length ? `<div class="sub">or: ${t.others.map((o) => `${esc(o.title)} by ${esc(o.artist)} (${pct(o.score)})`).join("; ")}</div>` : ""}`;
+const folderOf = (file) => file.replace(/[\\/][^\\/]*$/, "");
 
 const RENDER = {
   identical: (g) => `<div class="group">
@@ -404,6 +475,28 @@ const RENDER = {
           <td><div class="title">${esc(t.title)}</div>${where(t)}</td>
           <td style="width:38%">${t.problems.map((p) => `<div><b>${esc(p.problem)}</b>: <span class="sub">${esc(p.details)}</span></div>`).join("")}</td>
           <td>${playButtons(t)}</td></tr>`).join("")}</table></details>
+    </div></div>`,
+
+  tags: (t) => `<div class="group" data-folder="${esc(folderOf(t.file))}" data-k="${t.k}"><table><tr>
+      <td style="width:150px"><span class="verdict ${VERDICT[t.verdict][0]}">${esc(t.verdict)}</span>
+        ${t.problems.length ? `<div class="sub">${esc(t.problems.join(", "))}</div>` : ""}</td>
+      <td>${nameCell(t)}</td><td style="width:36%">${identified(t)}</td>
+      <td>${playButtons(t)}<div><button class="small" data-picard="track" title="Open this track in MusicBrainz Picard">Picard</button></div></td></tr></table></div>`,
+
+  tagFolders: (f) => `<div class="group album" data-folder="${esc(f.folder)}" data-k="${f.k}">
+    <div class="group-head"><b>${num(f.rows.length + f.more)} of ${num(f.tracks)}</b> <span>tracks to fix</span>
+      ${Object.entries(f.counts).map(([v, n]) => `<span class="verdict ${VERDICT[v][0]}">${num(n)} ${esc(v.toLowerCase())}</span>`).join("")}
+      <span class="actions"><button class="small" data-open-folder title="Show the folder">📂 Folder</button>
+        <button class="small primary" data-picard title="Open this folder in MusicBrainz Picard">Open in Picard</button></span></div>
+    <div class="album-body">
+      <div class="path">${esc(f.folder)}</div>
+      ${f.loose ? `<div class="sub">A folder of loose tracks, not one album: <i>Open in Picard</i> opens just its tracks to fix (up to 200); cluster them there first.</div>`
+        : f.guess ? `<div>Looks like <b>${esc(f.guess.album)}</b> by ${esc(f.guess.artist)} <span class="sub">(${num(f.guess.tracks)} of ${num(f.guess.of)} identified tracks are on it)</span></div>` : ""}
+      <details><summary>Tracks (${num(f.rows.length + f.more)})</summary><table>
+        ${f.rows.map((t) => `<tr><td style="width:150px"><span class="verdict ${VERDICT[t.verdict][0]}">${esc(t.verdict)}</span></td>
+          <td><div class="title">${esc(t.title)}</div><div class="sub">${esc(t.artist)} — ${esc(t.album)}</div></td>
+          <td style="width:40%">${identified(t)}</td><td>${playButtons(t)}</td></tr>`).join("")}
+        ${f.more ? `<tr><td colspan="4" class="sub">… and ${num(f.more)} more: use <b>By track</b> to see them all.</td></tr>` : ""}</table></details>
     </div></div>`,
 
   check: (p) => `<div class="group"><div class="group-head"><b>Audio match ${pct(p.match)}</b> <span>sonic distance ${p.sonic.toFixed(3)}</span></div>
@@ -547,7 +640,14 @@ async function loadSettings() {
     const el = f.elements[k];
     if (el) el.type === "checkbox" ? (el.checked = v) : (el.value = v);
   }
-  for (const k of ["holding_dir", "workers", "ffmpeg", "fpcalc"]) f.elements[k].value = s[k];
+  for (const k of ["holding_dir", "workers", "ffmpeg", "fpcalc", "picard"]) f.elements[k].value = s[k];
+  f.elements.acoustid_key.value = "";
+  f.elements.acoustid_key.placeholder = s.acoustid_key_set ? "set (hidden); paste a new one to change it" : "paste your key here";
+  f.elements.acoustid_key_remove.checked = false;
+  f.elements.acoustid_key_remove.parentElement.classList.toggle("hidden", !s.acoustid_key_set);
+  $("#acoustid-status").innerHTML = s.acoustid_key_set ? "Tracks can be looked up on the Tags tab." :
+    `Free: <a href="https://acoustid.org/new-application" target="_blank" rel="noopener">register an application</a> and paste its key.`;
+  $("#picard-status").textContent = s.picard_found ? "Found: " + s.picard_found : "Not found. " + s.picard_help;
   $("#holding-default").textContent = s.default_holding || "a _duplicates_holding folder at the top of the music's drive";
 }
 async function saveSettings() {
@@ -556,7 +656,10 @@ async function saveSettings() {
   for (const k of ["identical_max_length_diff", "identical_max_loudness_diff", "same_audio", "maybe_audio"]) rules[k] = parseFloat(f.elements[k].value);
   rules.split_on_title_words = f.elements.split_on_title_words.checked;
   await api("/api/settings", { rules, holding_dir: f.elements.holding_dir.value, workers: +f.elements.workers.value,
-    ffmpeg: f.elements.ffmpeg.value, fpcalc: f.elements.fpcalc.value });
+    ffmpeg: f.elements.ffmpeg.value, fpcalc: f.elements.fpcalc.value, picard: f.elements.picard.value,
+    acoustid_key: f.elements.acoustid_key.value, acoustid_key_remove: f.elements.acoustid_key_remove.checked });
+  await refreshState();
+  loadSettings();
   $("#settings-saved").textContent = "Saved.";
   setTimeout(() => ($("#settings-saved").textContent = ""), 3000);
 }

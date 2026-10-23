@@ -24,6 +24,7 @@
   <button data-tab="broken">Possibly broken <span class="count" id="n-broken"></span></button>
   <button data-tab="check">Check by ear <span class="count" id="n-check"></span></button>
   <button data-tab="unanalysed">Not analysed <span class="count" id="n-unanalysed"></span></button>
+  <button data-tab="tags">Tags <span class="count" id="n-tags"></span></button>
   <button data-tab="moves">Move &amp; undo</button>
   <button data-tab="settings">Settings</button>
   <button data-tab="setup">Setup</button>
@@ -174,6 +175,53 @@
     <div class="pager" data-for="unanalysed"></div>
   </section>
 
+  <!-- TAGS -->
+  <section id="tab-tags" class="tab hidden">
+    <p class="hint">Tracks whose tags (artist, album, title) are missing or wrong, and what they really are according to
+      <a href="https://acoustid.org" target="_blank" rel="noopener">AcoustID</a>, which identifies music by its sound.
+      This tab never changes your files: fix the tags in
+      <a href="https://picard.musicbrainz.org" target="_blank" rel="noopener">MusicBrainz Picard</a>, a folder at a time,
+      then identify again to see what's left.</p>
+    <div class="panel">
+      <h2>Identify tracks</h2>
+      <div id="acoustid-off" class="notice warn hidden">Looking tracks up needs a free AcoustID key:
+        <a href="https://acoustid.org/new-application" target="_blank" rel="noopener">get one here</a> (sign in, then
+        register an application with any name), and paste it in <button class="link" data-goto="settings">Settings</button>.</div>
+      <p class="hint">For each track, its audio fingerprint (the first two minutes, as numbers) and its length are sent to
+        AcoustID, about 3 a second. No file names, paths or tags are sent. Tracks without a fingerprint are
+        fingerprinted first. Each file is looked up once; it can be stopped and resumed.</p>
+      <div class="row-buttons">
+        <select id="identify-scope"><option value="">Tracks whose tags look wrong</option>
+          <option value="all">Every track (hours for a big library)</option></select>
+        <button class="primary" id="btn-identify">Identify tracks</button>
+        <span id="tags-when" class="sub"></span></div>
+      <details><summary>Fixing tags in Picard without upsetting Plex</summary>
+        <ul class="hint">
+          <li>In Picard's <b>Options › File Naming</b>, turn off <b>Rename files</b> and <b>Move files</b>. Files then stay
+            where they are, so Plex keeps their play counts, ratings and playlist places, and this app's move history
+            stays right.</li>
+          <li>Open a folder in Picard, select the files and press <b>Scan</b> (AcoustID) or <b>Lookup</b>, check the
+            album it found, then <b>Save</b>.</li>
+          <li>Plex picks up the new tags at its next library scan (or <i>Move &amp; undo › Ask Plex to rescan</i>).
+            Saving tags changes the files, so they're fingerprinted again at the next identify or scan.</li>
+        </ul></details>
+    </div>
+    <div class="reason-chips" id="tag-verdicts"></div>
+    <div class="view-switch" id="tags-view"><button data-view="folders" class="active">By folder</button>
+      <button data-view="tracks">By track</button></div>
+    <div class="filters" data-for="tags">
+      <input type="search" name="q" placeholder="Search tags, identified names or folder">
+      <select name="verdict"><option value="">Every verdict</option><option value="issues">Needs work (all but “look right”)</option>
+        <option>Identified, needs tags</option><option>Named differently</option><option>Unsure</option>
+        <option>Not in AcoustID</option><option>Tags look right</option></select>
+      <select name="problem"><option value="">Any tag problem</option><option>no artist</option><option>no album</option>
+        <option>no real title</option><option>title looks like a file name</option><option>title from a video</option></select>
+    </div>
+    <div class="bulk"><span id="tags-total"></span></div>
+    <div id="tags-list" class="list"></div>
+    <div class="pager" data-for="tags"></div>
+  </section>
+
   <!-- MOVES -->
   <section id="tab-moves" class="tab hidden">
     <div class="panel">
@@ -218,6 +266,12 @@
         <label>ffmpeg <input name="ffmpeg" class="wide"></label>
         <label>fpcalc <input name="fpcalc" class="wide"></label>
       </details>
+      <h2>Tags</h2>
+      <label>AcoustID key <input name="acoustid_key" class="wide" autocomplete="off" id="acoustid-input">
+        <span class="hint" id="acoustid-status"></span></label>
+      <label class="check"><input type="checkbox" name="acoustid_key_remove"> Remove the key (stop looking tracks up)</label>
+      <label>MusicBrainz Picard <input name="picard" class="wide" placeholder="found automatically">
+        <span class="hint" id="picard-status"></span></label>
       <h2>Holding folder</h2>
       <label>Moved copies go to <input name="holding_dir" class="wide" id="holding-input"></label>
       <p class="hint">Leave empty to use <code id="holding-default"></code>. A folder on the same drive as the
